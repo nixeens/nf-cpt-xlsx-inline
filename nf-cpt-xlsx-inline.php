@@ -65,8 +65,6 @@ use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
-use PhpOffice\PhpSpreadsheet\Cell\DataType;
-use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 // -----------------------------------------------------------------------------
 // Admin UI registration.
@@ -131,6 +129,44 @@ function nf_xlsx_render_admin_page() {
 
     $forms       = nf_xlsx_get_forms();
     $selected_id = isset($_GET['form_id']) ? absint($_GET['form_id']) : 0;
+
+    if (!$selected_id && !empty($forms)) {
+        $firstKey    = array_key_first($forms);
+        $selected_id = $firstKey ? (int) $firstKey : 0;
+    }
+
+    $fields = [];
+    if ($selected_id) {
+        $fields = nf_xlsx_get_form_fields($selected_id);
+    }
+
+    $availableColumns = $selected_id ? nf_xlsx_prepare_columns($fields) : [];
+    $availableIds     = array_map(static function ($column) {
+        return isset($column['id']) ? (string) $column['id'] : '';
+    }, $availableColumns);
+    $availableIds     = array_values(array_filter($availableIds, static function ($value) {
+        return $value !== '';
+    }));
+
+    $rawSelectedColumns = isset($_GET['columns']) ? (array) wp_unslash($_GET['columns']) : [];
+    $rawSelectedColumns = array_map('sanitize_text_field', $rawSelectedColumns);
+    $rawSelectedColumns = array_values(array_unique(array_filter($rawSelectedColumns, static function ($value) {
+        return $value !== '';
+    })));
+
+    $selectedColumns = $rawSelectedColumns;
+    if ($availableColumns) {
+        $selectedColumns = nf_xlsx_normalize_column_selection($selectedColumns, $availableColumns);
+
+        if (!$selectedColumns) {
+            $selectedColumns = $availableIds;
+        }
+    } else {
+        $selectedColumns = [];
+    }
+
+    $previewColumns     = $availableColumns ? nf_xlsx_prepare_columns($fields, $selectedColumns) : [];
+    $previewSubmissions = $selected_id ? nf_xlsx_get_submissions($selected_id, 5) : [];
     ?>
     <div class="wrap">
         <h1><?php esc_html_e('NF Submissions Export', 'nf-cpt-xlsx-inline'); ?></h1>
@@ -139,9 +175,8 @@ function nf_xlsx_render_admin_page() {
         <?php if (empty($forms)) : ?>
             <div class="notice notice-warning"><p><?php esc_html_e('No Ninja Forms available. Create a form to enable exports.', 'nf-cpt-xlsx-inline'); ?></p></div>
         <?php else : ?>
-            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-                <?php wp_nonce_field('nf_xlsx_export', '_nf_xlsx_nonce'); ?>
-                <input type="hidden" name="action" value="nf_xlsx_export">
+            <form method="get" action="<?php echo esc_url(admin_url('admin.php')); ?>" class="nf-xlsx-options-form">
+                <input type="hidden" name="page" value="nf-cpt-xlsx-inline">
                 <table class="form-table" role="presentation">
                     <tbody>
                         <tr>
@@ -152,13 +187,89 @@ function nf_xlsx_render_admin_page() {
                                         <option value="<?php echo esc_attr($id); ?>" <?php selected($selected_id, $id); ?>><?php echo esc_html($title); ?></option>
                                     <?php endforeach; ?>
                                 </select>
-                                <p class="description"><?php esc_html_e('Exports include all field labels, values, and uploaded file URLs.', 'nf-cpt-xlsx-inline'); ?></p>
+                                <p class="description"><?php esc_html_e('Choose a form and adjust which columns appear in the export. Update the preview after making changes.', 'nf-cpt-xlsx-inline'); ?></p>
                             </td>
                         </tr>
+                        <?php if ($availableColumns) : ?>
+                            <tr>
+                                <th scope="row"><?php esc_html_e('Columns', 'nf-cpt-xlsx-inline'); ?></th>
+                                <td>
+                                    <fieldset>
+                                        <legend class="screen-reader-text"><?php esc_html_e('Select columns to export', 'nf-cpt-xlsx-inline'); ?></legend>
+                                        <?php foreach ($availableColumns as $column) :
+                                            $columnId    = isset($column['id']) ? (string) $column['id'] : '';
+                                            $isChecked   = in_array($columnId, $selectedColumns, true);
+                                            $inputId     = 'nf-xlsx-column-' . sanitize_html_class($columnId);
+                                            ?>
+                                            <label for="<?php echo esc_attr($inputId); ?>" style="display: inline-block; margin-right: 12px;">
+                                                <input type="checkbox" id="<?php echo esc_attr($inputId); ?>" name="columns[]" value="<?php echo esc_attr($columnId); ?>" <?php checked($isChecked); ?>>
+                                                <?php echo esc_html($column['header']); ?>
+                                            </label>
+                                        <?php endforeach; ?>
+                                    </fieldset>
+                                </td>
+                            </tr>
+                        <?php endif; ?>
                     </tbody>
                 </table>
-                <?php submit_button(__('Export to XLSX', 'nf-cpt-xlsx-inline')); ?>
+                <?php submit_button(__('Update Preview', 'nf-cpt-xlsx-inline'), 'secondary', 'submit', false); ?>
             </form>
+
+            <?php if ($selected_id) : ?>
+                <h2><?php esc_html_e('Preview (first 5 submissions)', 'nf-cpt-xlsx-inline'); ?></h2>
+                <?php if (!$availableColumns) : ?>
+                    <p><?php esc_html_e('This form does not have any fields available for export.', 'nf-cpt-xlsx-inline'); ?></p>
+                <?php else : ?>
+                    <table class="widefat striped">
+                        <thead>
+                            <tr>
+                                <?php foreach ($previewColumns as $column) : ?>
+                                    <th scope="col"><?php echo esc_html($column['header']); ?></th>
+                                <?php endforeach; ?>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if ($previewSubmissions) : ?>
+                                <?php foreach ($previewSubmissions as $submission) : ?>
+                                    <tr>
+                                        <?php foreach ($previewColumns as $column) : ?>
+                                            <td>
+                                                <?php
+                                                if ($column['field'] === null) {
+                                                    echo wp_kses_post(nl2br(esc_html(nf_xlsx_format_date($submission['sub_date']))));
+                                                } else {
+                                                    $payload = nf_xlsx_extract_submission_field_payload($submission, $column['field']);
+                                                    echo wp_kses_post(nl2br(esc_html($payload['text'])));
+                                                }
+                                                ?>
+                                            </td>
+                                        <?php endforeach; ?>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php else : ?>
+                                <tr>
+                                    <td colspan="<?php echo esc_attr(max(1, count($previewColumns))); ?>"><?php esc_html_e('No submissions found for this form.', 'nf-cpt-xlsx-inline'); ?></td>
+                                </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                <?php endif; ?>
+
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-top: 20px;">
+                    <?php wp_nonce_field('nf_xlsx_export', '_nf_xlsx_nonce'); ?>
+                    <input type="hidden" name="action" value="nf_xlsx_export">
+                    <input type="hidden" name="form_id" value="<?php echo esc_attr($selected_id); ?>">
+                    <?php foreach ($selectedColumns as $columnId) : ?>
+                        <input type="hidden" name="columns[]" value="<?php echo esc_attr($columnId); ?>">
+                    <?php endforeach; ?>
+                    <?php
+                    if (!$selectedColumns) {
+                        echo '<p class="description">' . esc_html__('Select at least one column before exporting.', 'nf-cpt-xlsx-inline') . '</p>';
+                    }
+                    submit_button(__('Export to XLSX', 'nf-cpt-xlsx-inline'));
+                    ?>
+                </form>
+            <?php endif; ?>
         <?php endif; ?>
     </div>
     <?php
@@ -185,10 +296,27 @@ function nf_xlsx_handle_export() {
             nf_xlsx_redirect_error(__('Selected form does not exist.', 'nf-cpt-xlsx-inline'));
         }
 
-        $fields      = nf_xlsx_get_form_fields($form_id);
+        $fields = nf_xlsx_get_form_fields($form_id);
+
+        $availableColumns = nf_xlsx_prepare_columns($fields);
+        if (!$availableColumns) {
+            nf_xlsx_redirect_error(__('No columns available for export.', 'nf-cpt-xlsx-inline'));
+        }
+
+        $rawSelectedColumns = isset($_POST['columns']) ? (array) wp_unslash($_POST['columns']) : [];
+        $rawSelectedColumns = array_map('sanitize_text_field', $rawSelectedColumns);
+        $rawSelectedColumns = array_values(array_unique(array_filter($rawSelectedColumns, static function ($value) {
+            return $value !== '';
+        })));
+
+        $selectedColumns = nf_xlsx_normalize_column_selection($rawSelectedColumns, $availableColumns);
+        if (!$selectedColumns) {
+            nf_xlsx_redirect_error(__('Please select at least one column to export.', 'nf-cpt-xlsx-inline'));
+        }
+
         $submissions = nf_xlsx_get_submissions($form_id);
 
-        $spreadsheet = nf_xlsx_build_workbook($form, $fields, $submissions);
+        $spreadsheet = nf_xlsx_build_workbook($form, $fields, $submissions, $selectedColumns);
 
         $filename = sprintf('nf-export-%d-%s.xlsx', (int) $form_id, gmdate('Y-m-d-H-i'));
         $uploads  = wp_upload_dir();
@@ -209,15 +337,15 @@ function nf_xlsx_handle_export() {
         $spreadsheet->disconnectWorksheets();
         unset($spreadsheet);
 
-        $redirect = add_query_arg(
-            [
-                'page'           => 'nf-cpt-xlsx-inline',
-                'form_id'        => $form_id,
-                'nf_xlsx_notice' => 'success',
-                'nf_xlsx_file'   => rawurlencode($filename),
-            ],
-            admin_url('admin.php')
-        );
+        $redirectArgs = [
+            'page'           => 'nf-cpt-xlsx-inline',
+            'form_id'        => $form_id,
+            'nf_xlsx_notice' => 'success',
+            'nf_xlsx_file'   => rawurlencode($filename),
+            'columns'        => $selectedColumns,
+        ];
+
+        $redirect = add_query_arg($redirectArgs, admin_url('admin.php'));
 
         wp_safe_redirect($redirect);
         exit;
@@ -296,31 +424,49 @@ function nf_xlsx_get_form_fields($form_id) {
             }
 
             $fields[] = [
-                'id'    => (int) $row['id'],
-                'key'   => $key,
-                'label' => $label,
-                'type'  => isset($row['type']) ? $row['type'] : '',
+                'id'         => (int) $row['id'],
+                'key'        => $key,
+                'label'      => $label,
+                'type'       => isset($row['type']) ? $row['type'] : '',
+                'identifier' => nf_xlsx_field_identifier((int) $row['id']),
             ];
         }
     }
 
-    return $fields;
+    return array_values($fields);
 }
 
-function nf_xlsx_get_submissions($form_id) {
+function nf_xlsx_get_submissions($form_id, $limit = 0) {
     global $wpdb;
 
     $subs_table = $wpdb->prefix . 'nf3_subs';
     $meta_table = $wpdb->prefix . 'nf3_sub_meta';
 
-    $sql = $wpdb->prepare(
-        "SELECT s.id AS sub_id, s.sub_date, m.meta_key, m.meta_value
-         FROM {$subs_table} AS s
-         LEFT JOIN {$meta_table} AS m ON m.sub_id = s.id
-         WHERE s.form_id = %d
-         ORDER BY s.sub_date ASC, m.meta_key ASC",
-        $form_id
-    );
+    if ($limit > 0) {
+        $subSelect = $wpdb->prepare(
+            "SELECT id, sub_date
+             FROM {$subs_table}
+             WHERE form_id = %d
+             ORDER BY sub_date ASC
+             LIMIT %d",
+            $form_id,
+            $limit
+        );
+
+        $sql = "SELECT s.id AS sub_id, s.sub_date, m.meta_key, m.meta_value
+                FROM ({$subSelect}) AS s
+                LEFT JOIN {$meta_table} AS m ON m.sub_id = s.id
+                ORDER BY s.sub_date ASC, m.meta_key ASC";
+    } else {
+        $sql = $wpdb->prepare(
+            "SELECT s.id AS sub_id, s.sub_date, m.meta_key, m.meta_value
+             FROM {$subs_table} AS s
+             LEFT JOIN {$meta_table} AS m ON m.sub_id = s.id
+             WHERE s.form_id = %d
+             ORDER BY s.sub_date ASC, m.meta_key ASC",
+            $form_id
+        );
+    }
 
     $rows = $wpdb->get_results($sql, ARRAY_A);
 
@@ -360,7 +506,7 @@ function nf_xlsx_get_submissions($form_id) {
 // -----------------------------------------------------------------------------
 // Spreadsheet builder.
 // -----------------------------------------------------------------------------
-function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) {
+function nf_xlsx_build_workbook(array $form, array $fields, array $submissions, array $selectedColumnIds) {
     $spreadsheet = new Spreadsheet();
     $spreadsheet->getProperties()
         ->setCreator(get_bloginfo('name'))
@@ -370,10 +516,15 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     $sheet = $spreadsheet->getActiveSheet();
     $sheet->setTitle(__('Submissions', 'nf-cpt-xlsx-inline'));
 
-    $columns = nf_xlsx_prepare_columns($fields);
+    $columns = nf_xlsx_prepare_columns($fields, $selectedColumnIds);
+
+    if (!$columns) {
+        throw new RuntimeException(__('No columns selected for export.', 'nf-cpt-xlsx-inline'));
+    }
 
     foreach ($columns as $column) {
-        $coordinate = nf_safe_set($sheet, $column['index'], 1, $column['header']);
+        nf_safe_set($sheet, $column['index'], 1, $column['header']);
+        $coordinate = nf_addr($column['index'], 1);
         $style      = $sheet->getStyle($coordinate);
         $style->getFont()->setBold(true);
         $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
@@ -381,9 +532,10 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     }
 
     if (empty($submissions)) {
-        $firstColumn = $columns[0];
-        $lastColumn  = end($columns);
-        $firstCoordinate = nf_safe_set($sheet, $firstColumn['index'], 2, __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
+        $firstColumn     = $columns[0];
+        $lastColumn      = end($columns);
+        nf_safe_set($sheet, $firstColumn['index'], 2, __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
+        $firstCoordinate = nf_addr($firstColumn['index'], 2);
         $sheet->mergeCells(nf_addr($firstColumn['index'], 2) . ':' . nf_addr($lastColumn['index'], 2));
         $sheet->getStyle($firstCoordinate)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
         $sheet->getRowDimension(2)->setRowHeight(24);
@@ -393,8 +545,9 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
 
         foreach ($submissions as $submission) {
             foreach ($columns as $column) {
-                if ($column['index'] === 1) {
-                    $coordinate = nf_safe_set($sheet, $column['index'], $rowIndex, nf_xlsx_format_date($submission['sub_date']));
+                if ($column['field'] === null) {
+                    nf_safe_set($sheet, $column['index'], $rowIndex, nf_xlsx_format_date($submission['sub_date']));
+                    $coordinate = nf_addr($column['index'], $rowIndex);
                     $style      = $sheet->getStyle($coordinate);
                     $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
                     $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
@@ -403,7 +556,8 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
 
                 $valuePayload = nf_xlsx_extract_submission_field_payload($submission, $column['field']);
 
-                $coordinate = nf_safe_set($sheet, $column['index'], $rowIndex, $valuePayload['text']);
+                nf_safe_set($sheet, $column['index'], $rowIndex, $valuePayload['text']);
+                $coordinate = nf_addr($column['index'], $rowIndex);
                 $style      = $sheet->getStyle($coordinate);
                 $style->getAlignment()->setWrapText(true);
                 $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
@@ -424,7 +578,7 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
 
     foreach ($columns as $column) {
         $dimension = $sheet->getColumnDimension(nf_col_from_index($column['index']));
-        $dimension->setWidth($column['index'] === 1 ? 22 : 30);
+        $dimension->setWidth($column['field'] === null ? 22 : 30);
     }
 
     $lastColumn = end($columns);
@@ -435,13 +589,14 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     return $spreadsheet;
 }
 
-function nf_xlsx_prepare_columns(array $fields) {
+function nf_xlsx_prepare_columns(array $fields, array $selectedColumnIds = []) {
     $columns         = [];
     $usedHeaders     = [];
     $fallbackCounter = 1;
 
     $firstHeader = nf_xlsx_register_unique_header(__('Submission Date', 'nf-cpt-xlsx-inline'), $usedHeaders);
     $columns[]   = [
+        'id'     => 'submission_date',
         'field'  => null,
         'header' => $firstHeader,
         'index'  => 1,
@@ -454,6 +609,7 @@ function nf_xlsx_prepare_columns(array $fields) {
         $header = nf_xlsx_resolve_field_header($field, $usedHeaders, $fallbackCounter);
 
         $columns[] = [
+            'id'     => isset($field['identifier']) ? (string) $field['identifier'] : nf_xlsx_field_identifier($field['id']),
             'field'  => $field,
             'header' => $header,
             'index'  => $position,
@@ -462,6 +618,20 @@ function nf_xlsx_prepare_columns(array $fields) {
 
         ++$position;
     }
+
+    if ($selectedColumnIds) {
+        $selectedLookup = array_fill_keys(array_map('strval', $selectedColumnIds), true);
+        $columns        = array_values(array_filter($columns, static function ($column) use ($selectedLookup) {
+            $id = isset($column['id']) ? (string) $column['id'] : '';
+            return isset($selectedLookup[$id]);
+        }));
+    }
+
+    foreach ($columns as $index => &$column) {
+        $column['index']  = $index + 1;
+        $column['letter'] = nf_xlsx_column_letter_from_position($column['index']);
+    }
+    unset($column);
 
     return $columns;
 }
@@ -978,26 +1148,45 @@ function nf_addr($column, $row) {
     return $column . $row;
 }
 
-function nf_safe_set(Worksheet $sheet, $column, $row, $value, $dataType = null) {
-    $coordinate = nf_addr($column, $row);
-
-    if ($dataType !== null) {
-        $sheet->setCellValueExplicit($coordinate, $value, $dataType);
-
-        return $coordinate;
+function nf_safe_set($sheet, $colIndex, $row, $value) {
+    if ($colIndex < 1) {
+        $colIndex = 1;
     }
 
-    if ($value === null) {
-        $value = '';
-    }
+    $column = Coordinate::stringFromColumnIndex((int) $colIndex);
+    $coordinate = $column . max(1, (int) $row);
 
-    if (is_int($value) || is_float($value)) {
-        $sheet->setCellValue($coordinate, $value);
-    } elseif (is_bool($value)) {
-        $sheet->setCellValueExplicit($coordinate, $value ? '1' : '0', DataType::TYPE_STRING);
-    } else {
-        $sheet->setCellValueExplicit($coordinate, (string) $value, DataType::TYPE_STRING);
-    }
+    $sheet->setCellValue($coordinate, $value ?? '');
 
     return $coordinate;
+}
+
+function nf_xlsx_field_identifier($fieldId) {
+    return 'field-' . (int) $fieldId;
+}
+
+function nf_xlsx_normalize_column_selection(array $selectedColumns, array $availableColumns) {
+    $selectedColumns = array_values(array_unique(array_filter(array_map('strval', $selectedColumns), static function ($value) {
+        return $value !== '';
+    })));
+
+    if (!$selectedColumns) {
+        return [];
+    }
+
+    $selectedLookup = array_fill_keys($selectedColumns, true);
+    $normalized     = [];
+
+    foreach ($availableColumns as $column) {
+        $id = isset($column['id']) ? (string) $column['id'] : '';
+        if ($id === '') {
+            continue;
+        }
+
+        if (isset($selectedLookup[$id])) {
+            $normalized[] = $id;
+        }
+    }
+
+    return $normalized;
 }
