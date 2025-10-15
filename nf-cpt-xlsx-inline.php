@@ -65,6 +65,8 @@ use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 // -----------------------------------------------------------------------------
 // Admin UI registration.
@@ -309,60 +311,47 @@ function nf_xlsx_get_submissions($form_id) {
     global $wpdb;
 
     $subs_table = $wpdb->prefix . 'nf3_subs';
-    $rows       = $wpdb->get_results(
-        $wpdb->prepare("SELECT id, sub_date FROM {$subs_table} WHERE form_id = %d ORDER BY sub_date ASC", $form_id),
-        ARRAY_A
+    $meta_table = $wpdb->prefix . 'nf3_sub_meta';
+
+    $sql = $wpdb->prepare(
+        "SELECT s.id AS sub_id, s.sub_date, m.meta_key, m.meta_value
+         FROM {$subs_table} AS s
+         LEFT JOIN {$meta_table} AS m ON m.sub_id = s.id
+         WHERE s.form_id = %d
+         ORDER BY s.sub_date ASC, m.meta_key ASC",
+        $form_id
     );
+
+    $rows = $wpdb->get_results($sql, ARRAY_A);
 
     if (!$rows) {
         return [];
     }
 
     $submissions = [];
-    $sub_ids     = [];
 
     foreach ($rows as $row) {
-        $id = (int) $row['id'];
+        $id = (int) $row['sub_id'];
 
-        $submissions[$id] = [
-            'id'       => $id,
-            'sub_date' => $row['sub_date'],
-            'meta'     => [],
-        ];
-
-        $sub_ids[] = $id;
-    }
-
-    if ($sub_ids) {
-        $meta_table   = $wpdb->prefix . 'nf3_sub_meta';
-        $placeholders = implode(',', array_fill(0, count($sub_ids), '%d'));
-        $sql          = "SELECT sub_id, meta_key, meta_value FROM {$meta_table} WHERE sub_id IN ({$placeholders})";
-
-        $args = $sub_ids;
-        array_unshift($args, $sql);
-
-        $prepared = call_user_func_array([$wpdb, 'prepare'], $args);
-
-        if ($prepared) {
-            $meta_rows = $wpdb->get_results($prepared, ARRAY_A);
-
-            if ($meta_rows) {
-                foreach ($meta_rows as $meta_row) {
-                    $sub_id  = (int) $meta_row['sub_id'];
-                    $metaKey = (string) $meta_row['meta_key'];
-
-                    if (!isset($submissions[$sub_id])) {
-                        continue;
-                    }
-
-                    if (!isset($submissions[$sub_id]['meta'][$metaKey])) {
-                        $submissions[$sub_id]['meta'][$metaKey] = [];
-                    }
-
-                    $submissions[$sub_id]['meta'][$metaKey][] = $meta_row['meta_value'];
-                }
-            }
+        if (!isset($submissions[$id])) {
+            $submissions[$id] = [
+                'id'       => $id,
+                'sub_date' => $row['sub_date'],
+                'meta'     => [],
+            ];
         }
+
+        if ($row['meta_key'] === null) {
+            continue;
+        }
+
+        $metaKey = (string) $row['meta_key'];
+
+        if (!isset($submissions[$id]['meta'][$metaKey])) {
+            $submissions[$id]['meta'][$metaKey] = [];
+        }
+
+        $submissions[$id]['meta'][$metaKey][] = $row['meta_value'];
     }
 
     return array_values($submissions);
@@ -384,9 +373,8 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     $columns = nf_xlsx_prepare_columns($fields);
 
     foreach ($columns as $column) {
-        $coordinate = $column['letter'] . '1';
-        $sheet->setCellValue($coordinate, $column['header']);
-        $style = $sheet->getStyle($coordinate);
+        $coordinate = nf_safe_set($sheet, $column['index'], 1, $column['header']);
+        $style      = $sheet->getStyle($coordinate);
         $style->getFont()->setBold(true);
         $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
         $style->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
@@ -395,9 +383,9 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     if (empty($submissions)) {
         $firstColumn = $columns[0];
         $lastColumn  = end($columns);
-        $sheet->setCellValue($firstColumn['letter'] . '2', __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
-        $sheet->mergeCells($firstColumn['letter'] . '2:' . $lastColumn['letter'] . '2');
-        $sheet->getStyle($firstColumn['letter'] . '2')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        $firstCoordinate = nf_safe_set($sheet, $firstColumn['index'], 2, __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
+        $sheet->mergeCells(nf_addr($firstColumn['index'], 2) . ':' . nf_addr($lastColumn['index'], 2));
+        $sheet->getStyle($firstCoordinate)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
         $sheet->getRowDimension(2)->setRowHeight(24);
         reset($columns);
     } else {
@@ -405,11 +393,9 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
 
         foreach ($submissions as $submission) {
             foreach ($columns as $column) {
-                $coordinate = $column['letter'] . $rowIndex;
-
                 if ($column['index'] === 1) {
-                    $sheet->setCellValue($coordinate, nf_xlsx_format_date($submission['sub_date']));
-                    $style = $sheet->getStyle($coordinate);
+                    $coordinate = nf_safe_set($sheet, $column['index'], $rowIndex, nf_xlsx_format_date($submission['sub_date']));
+                    $style      = $sheet->getStyle($coordinate);
                     $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
                     $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
                     continue;
@@ -417,8 +403,8 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
 
                 $valuePayload = nf_xlsx_extract_submission_field_payload($submission, $column['field']);
 
-                $sheet->setCellValue($coordinate, $valuePayload['text']);
-                $style = $sheet->getStyle($coordinate);
+                $coordinate = nf_safe_set($sheet, $column['index'], $rowIndex, $valuePayload['text']);
+                $style      = $sheet->getStyle($coordinate);
                 $style->getAlignment()->setWrapText(true);
                 $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
                 $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
@@ -437,13 +423,13 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     $sheet->freezePane('A2');
 
     foreach ($columns as $column) {
-        $dimension = $sheet->getColumnDimension($column['letter']);
+        $dimension = $sheet->getColumnDimension(nf_col_from_index($column['index']));
         $dimension->setWidth($column['index'] === 1 ? 22 : 30);
     }
 
     $lastColumn = end($columns);
     $lastRow    = max(2, count($submissions) + 1);
-    $sheet->getStyle($columns[0]['letter'] . '1:' . $lastColumn['letter'] . $lastRow)->getAlignment()->setWrapText(true);
+    $sheet->getStyle(nf_addr($columns[0]['index'], 1) . ':' . nf_addr($lastColumn['index'], $lastRow))->getAlignment()->setWrapText(true);
     reset($columns);
 
     return $spreadsheet;
@@ -537,17 +523,7 @@ function nf_xlsx_normalize_header_key($label) {
 }
 
 function nf_xlsx_column_letter_from_position($position) {
-    $position = (int) $position;
-
-    if ($position < 1) {
-        $position = 1;
-    }
-
-    try {
-        return Coordinate::stringFromColumnIndex($position);
-    } catch (Throwable $exception) {
-        return Coordinate::stringFromColumnIndex(1);
-    }
+    return nf_col_from_index($position);
 }
 
 // -----------------------------------------------------------------------------
@@ -967,4 +943,61 @@ function nf_xlsx_format_date($date) {
     }
 
     return wp_date(get_option('date_format') . ' ' . get_option('time_format'), $timestamp);
+}
+
+function nf_col_from_index($index) {
+    $index = (int) $index;
+
+    if ($index < 1) {
+        $index = 1;
+    }
+
+    try {
+        return Coordinate::stringFromColumnIndex($index);
+    } catch (Throwable $exception) {
+        return 'A';
+    }
+}
+
+function nf_addr($column, $row) {
+    if (is_numeric($column)) {
+        $column = nf_col_from_index((int) $column);
+    } else {
+        $column = strtoupper(trim((string) $column));
+
+        if ($column === '') {
+            $column = 'A';
+        }
+    }
+
+    $row = (int) $row;
+    if ($row < 1) {
+        $row = 1;
+    }
+
+    return $column . $row;
+}
+
+function nf_safe_set(Worksheet $sheet, $column, $row, $value, $dataType = null) {
+    $coordinate = nf_addr($column, $row);
+
+    if ($dataType !== null) {
+        $sheet->setCellValueExplicit($coordinate, $value, $dataType);
+
+        return $coordinate;
+    }
+
+    if ($value === null) {
+        $value = '';
+    }
+
+    if (is_int($value) || is_float($value)) {
+        $sheet->setCellValue($coordinate, $value);
+    } elseif (is_bool($value)) {
+        $sheet->setCellValueExplicit($coordinate, $value ? '1' : '0', DataType::TYPE_STRING);
+    } else {
+        $sheet->setCellValueExplicit($coordinate, (string) $value, DataType::TYPE_STRING);
+    }
+
+    return $coordinate;
 }
