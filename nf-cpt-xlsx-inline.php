@@ -57,6 +57,22 @@ function nf_xlsx_register_local_autoloaders() {
         }
     });
 
+    spl_autoload_register(static function ($class) use ($base) {
+        $prefix = 'ZipStream\\';
+        $length = strlen($prefix);
+
+        if (strncmp($class, $prefix, $length) !== 0) {
+            return;
+        }
+
+        $relative = substr($class, $length);
+        $file     = $base . 'ZipStream/' . str_replace('\\', '/', $relative) . '.php';
+
+        if (file_exists($file)) {
+            require_once $file;
+        }
+    });
+
     $registered = true;
 }
 add_action('plugins_loaded', 'nf_xlsx_register_local_autoloaders', 1);
