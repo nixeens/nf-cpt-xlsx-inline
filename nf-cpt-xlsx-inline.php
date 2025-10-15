@@ -295,7 +295,10 @@ function nf_cpt_xlsx_inline_get_form_fields($form_id) {
 
     $table = $wpdb->prefix . 'nf3_fields';
     $rows  = $wpdb->get_results(
-        $wpdb->prepare("SELECT id, `key`, label, type FROM {$table} WHERE parent_id = %d ORDER BY id ASC", $form_id),
+        $wpdb->prepare(
+            "SELECT id, `key`, label, type FROM {$table} WHERE parent_id = %d ORDER BY `order` ASC, id ASC",
+            $form_id
+        ),
         ARRAY_A
     );
 
@@ -464,11 +467,17 @@ function nf_cpt_xlsx_inline_prepare_value_payload($value) {
         // File uploads or multiple selections.
         if (nf_cpt_xlsx_inline_is_upload_payload($value)) {
             $filePath = nf_cpt_xlsx_inline_locate_file_path($value);
-            if ($filePath) {
+            $label    = nf_cpt_xlsx_inline_guess_file_label($value, $filePath);
+
+            if ($filePath && nf_cpt_xlsx_inline_is_image_path($filePath)) {
                 $payload['images'][] = $filePath;
             }
 
-            $payload['text'] = nf_cpt_xlsx_inline_guess_file_label($value, $filePath);
+            if ($label !== '') {
+                $payload['text'] = $label;
+            } elseif (!empty($value['url']) && is_string($value['url'])) {
+                $payload['text'] = $value['url'];
+            }
         } else {
             $texts  = [];
             $images = [];
@@ -636,7 +645,7 @@ function nf_cpt_xlsx_inline_embed_images($sheet, $coordinate, array $images, $ro
             break;
         }
 
-        if (!file_exists($path)) {
+        if (!file_exists($path) || !nf_cpt_xlsx_inline_is_image_path($path)) {
             continue;
         }
 
@@ -662,4 +671,21 @@ function nf_cpt_xlsx_inline_format_date($date) {
     }
 
     return wp_date(get_option('date_format') . ' ' . get_option('time_format'), $timestamp);
+}
+
+function nf_cpt_xlsx_inline_is_image_path($path) {
+    if (!is_string($path) || $path === '') {
+        return false;
+    }
+
+    $filetype = wp_check_filetype($path);
+    if (!empty($filetype['ext'])) {
+        $allowed = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'];
+        if (in_array(strtolower($filetype['ext']), $allowed, true)) {
+            return true;
+        }
+    }
+
+    $imageInfo = @getimagesize($path);
+    return $imageInfo !== false;
 }
