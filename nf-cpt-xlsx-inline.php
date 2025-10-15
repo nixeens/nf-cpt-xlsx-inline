@@ -380,6 +380,14 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
         $headers[] = $field['label'] !== '' ? $field['label'] : $field['key'];
     }
 
+    $headers = array_values(array_filter($headers, static function ($header) {
+        return $header !== null;
+    }));
+
+    if (empty($headers)) {
+        $headers[] = __('Submission Date', 'nf-cpt-xlsx-inline');
+    }
+
     foreach ($headers as $index => $header) {
         $coordinate = Coordinate::stringFromColumnIndex($index + 1) . '1';
         $sheet->setCellValue($coordinate, $header);
@@ -429,7 +437,7 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     $sheet->freezePane('A2');
     $sheet->getColumnDimension('A')->setWidth(22);
 
-    $totalColumns = count($headers);
+    $totalColumns = max(1, count($headers));
     for ($index = 2; $index <= $totalColumns; $index++) {
         $sheet->getColumnDimension(Coordinate::stringFromColumnIndex($index))->setWidth(30);
     }
