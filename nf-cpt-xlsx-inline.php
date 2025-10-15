@@ -286,11 +286,18 @@ function nf_xlsx_get_form_fields($form_id) {
     $fields = [];
     if ($rows) {
         foreach ($rows as $row) {
+            $key   = isset($row['key']) ? trim((string) $row['key']) : '';
+            $label = isset($row['label']) ? trim((string) $row['label']) : '';
+
+            if ($label === '' && $key !== '') {
+                $label = $key;
+            }
+
             $fields[] = [
                 'id'    => (int) $row['id'],
-                'key'   => $row['key'],
-                'label' => $row['label'] !== '' ? $row['label'] : $row['key'],
-                'type'  => $row['type'],
+                'key'   => $key,
+                'label' => $label,
+                'type'  => isset($row['type']) ? $row['type'] : '',
             ];
         }
     }
@@ -374,60 +381,53 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     $sheet = $spreadsheet->getActiveSheet();
     $sheet->setTitle(__('Submissions', 'nf-cpt-xlsx-inline'));
 
-    $headers = [__('Submission Date', 'nf-cpt-xlsx-inline')];
+    $columns = nf_xlsx_prepare_columns($fields);
 
-    foreach ($fields as $field) {
-        $headers[] = $field['label'] !== '' ? $field['label'] : $field['key'];
-    }
-
-    $headers = array_values(array_filter($headers, static function ($header) {
-        return $header !== null;
-    }));
-
-    if (empty($headers)) {
-        $headers[] = __('Submission Date', 'nf-cpt-xlsx-inline');
-    }
-
-    foreach ($headers as $index => $header) {
-        $coordinate = Coordinate::stringFromColumnIndex($index + 1) . '1';
-        $sheet->setCellValue($coordinate, $header);
-        $sheet->getStyle($coordinate)->getFont()->setBold(true);
-        $sheet->getStyle($coordinate)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-        $sheet->getStyle($coordinate)->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
+    foreach ($columns as $column) {
+        $coordinate = $column['letter'] . '1';
+        $sheet->setCellValue($coordinate, $column['header']);
+        $style = $sheet->getStyle($coordinate);
+        $style->getFont()->setBold(true);
+        $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        $style->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
     }
 
     if (empty($submissions)) {
-        $sheet->setCellValue('A2', __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
-        $lastColumn = Coordinate::stringFromColumnIndex(count($headers));
-        $sheet->mergeCells('A2:' . $lastColumn . '2');
-        $sheet->getStyle('A2')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        $firstColumn = $columns[0];
+        $lastColumn  = end($columns);
+        $sheet->setCellValue($firstColumn['letter'] . '2', __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
+        $sheet->mergeCells($firstColumn['letter'] . '2:' . $lastColumn['letter'] . '2');
+        $sheet->getStyle($firstColumn['letter'] . '2')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
         $sheet->getRowDimension(2)->setRowHeight(24);
+        reset($columns);
     } else {
         $rowIndex = 2;
 
         foreach ($submissions as $submission) {
-            $sheet->setCellValue('A' . $rowIndex, nf_xlsx_format_date($submission['sub_date']));
-            $sheet->getStyle('A' . $rowIndex)->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
-            $sheet->getStyle('A' . $rowIndex)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+            foreach ($columns as $column) {
+                $coordinate = $column['letter'] . $rowIndex;
 
-            $columnIndex = 2;
+                if ($column['index'] === 1) {
+                    $sheet->setCellValue($coordinate, nf_xlsx_format_date($submission['sub_date']));
+                    $style = $sheet->getStyle($coordinate);
+                    $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
+                    $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+                    continue;
+                }
 
-            foreach ($fields as $field) {
-                $coordinate   = Coordinate::stringFromColumnIndex($columnIndex) . $rowIndex;
-                $valuePayload = nf_xlsx_extract_submission_field_payload($submission, $field);
+                $valuePayload = nf_xlsx_extract_submission_field_payload($submission, $column['field']);
 
                 $sheet->setCellValue($coordinate, $valuePayload['text']);
-                $sheet->getStyle($coordinate)->getAlignment()->setWrapText(true);
-                $sheet->getStyle($coordinate)->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
-                $sheet->getStyle($coordinate)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+                $style = $sheet->getStyle($coordinate);
+                $style->getAlignment()->setWrapText(true);
+                $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
+                $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
 
                 if (!empty($valuePayload['links'])) {
                     $cell = $sheet->getCell($coordinate);
                     $cell->getHyperlink()->setUrl($valuePayload['links'][0]);
                     $cell->getHyperlink()->setTooltip($valuePayload['links'][0]);
                 }
-
-                ++$columnIndex;
             }
 
             ++$rowIndex;
@@ -435,18 +435,119 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     }
 
     $sheet->freezePane('A2');
-    $sheet->getColumnDimension('A')->setWidth(22);
 
-    $totalColumns = max(1, count($headers));
-    for ($index = 2; $index <= $totalColumns; $index++) {
-        $sheet->getColumnDimension(Coordinate::stringFromColumnIndex($index))->setWidth(30);
+    foreach ($columns as $column) {
+        $dimension = $sheet->getColumnDimension($column['letter']);
+        $dimension->setWidth($column['index'] === 1 ? 22 : 30);
     }
 
-    $lastColumn = Coordinate::stringFromColumnIndex($totalColumns);
+    $lastColumn = end($columns);
     $lastRow    = max(2, count($submissions) + 1);
-    $sheet->getStyle('A1:' . $lastColumn . $lastRow)->getAlignment()->setWrapText(true);
+    $sheet->getStyle($columns[0]['letter'] . '1:' . $lastColumn['letter'] . $lastRow)->getAlignment()->setWrapText(true);
+    reset($columns);
 
     return $spreadsheet;
+}
+
+function nf_xlsx_prepare_columns(array $fields) {
+    $columns         = [];
+    $usedHeaders     = [];
+    $fallbackCounter = 1;
+
+    $firstHeader = nf_xlsx_register_unique_header(__('Submission Date', 'nf-cpt-xlsx-inline'), $usedHeaders);
+    $columns[]   = [
+        'field'  => null,
+        'header' => $firstHeader,
+        'index'  => 1,
+        'letter' => nf_xlsx_column_letter_from_position(1),
+    ];
+
+    $position = 2;
+
+    foreach ($fields as $field) {
+        $header = nf_xlsx_resolve_field_header($field, $usedHeaders, $fallbackCounter);
+
+        $columns[] = [
+            'field'  => $field,
+            'header' => $header,
+            'index'  => $position,
+            'letter' => nf_xlsx_column_letter_from_position($position),
+        ];
+
+        ++$position;
+    }
+
+    return $columns;
+}
+
+function nf_xlsx_resolve_field_header(array $field, array &$usedHeaders, int &$fallbackCounter) {
+    $candidates = [];
+
+    if (isset($field['label'])) {
+        $candidates[] = $field['label'];
+    }
+
+    if (isset($field['key'])) {
+        $candidates[] = $field['key'];
+    }
+
+    $label = '';
+
+    foreach ($candidates as $candidate) {
+        $candidate = trim((string) $candidate);
+
+        if ($candidate !== '') {
+            $label = $candidate;
+            break;
+        }
+    }
+
+    if ($label === '') {
+        $label = 'Column_' . $fallbackCounter;
+        ++$fallbackCounter;
+    }
+
+    return nf_xlsx_register_unique_header($label, $usedHeaders);
+}
+
+function nf_xlsx_register_unique_header($label, array &$usedHeaders) {
+    $label     = trim((string) $label);
+    $baseLabel = $label !== '' ? $label : 'Column_' . (count($usedHeaders) + 1);
+    $label     = $baseLabel;
+    $suffix    = 2;
+    $key       = nf_xlsx_normalize_header_key($label);
+
+    while (isset($usedHeaders[$key])) {
+        $label = $baseLabel . ' (' . $suffix . ')';
+        $key   = nf_xlsx_normalize_header_key($label);
+        ++$suffix;
+    }
+
+    $usedHeaders[$key] = true;
+
+    return $label;
+}
+
+function nf_xlsx_normalize_header_key($label) {
+    if (function_exists('mb_strtolower')) {
+        return mb_strtolower($label, 'UTF-8');
+    }
+
+    return strtolower($label);
+}
+
+function nf_xlsx_column_letter_from_position($position) {
+    $position = (int) $position;
+
+    if ($position < 1) {
+        $position = 1;
+    }
+
+    try {
+        return Coordinate::stringFromColumnIndex($position);
+    } catch (Throwable $exception) {
+        return Coordinate::stringFromColumnIndex(1);
+    }
 }
 
 // -----------------------------------------------------------------------------
