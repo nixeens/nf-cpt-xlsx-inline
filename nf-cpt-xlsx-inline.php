@@ -64,20 +64,20 @@ add_action('plugins_loaded', 'nf_xlsx_register_local_autoloaders', 1);
 use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
-use PhpOffice\PhpSpreadsheet\Worksheet\Drawing;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 
 // -----------------------------------------------------------------------------
 // Admin UI registration.
 // -----------------------------------------------------------------------------
 add_action('admin_menu', static function () {
-    add_submenu_page(
-        'ninja-forms',
-        __('Export to XLSX', 'nf-cpt-xlsx-inline'),
-        __('Export to XLSX', 'nf-cpt-xlsx-inline'),
+    add_menu_page(
+        __('NF Submissions Export', 'nf-cpt-xlsx-inline'),
+        __('NF Submissions Export', 'nf-cpt-xlsx-inline'),
         'manage_options',
         'nf-cpt-xlsx-inline',
-        'nf_xlsx_render_admin_page'
+        'nf_xlsx_render_admin_page',
+        'dashicons-media-spreadsheet',
+        58
     );
 });
 
@@ -131,8 +131,8 @@ function nf_xlsx_render_admin_page() {
     $selected_id = isset($_GET['form_id']) ? absint($_GET['form_id']) : 0;
     ?>
     <div class="wrap">
-        <h1><?php esc_html_e('Ninja Forms → Export to XLSX', 'nf-cpt-xlsx-inline'); ?></h1>
-        <p><?php esc_html_e('Create a UTF-8 Excel workbook of Ninja Forms submissions. Uploaded images are embedded alongside their field values.', 'nf-cpt-xlsx-inline'); ?></p>
+        <h1><?php esc_html_e('NF Submissions Export', 'nf-cpt-xlsx-inline'); ?></h1>
+        <p><?php esc_html_e('Download an .xlsx file containing all submissions for the selected Ninja Form.', 'nf-cpt-xlsx-inline'); ?></p>
 
         <?php if (empty($forms)) : ?>
             <div class="notice notice-warning"><p><?php esc_html_e('No Ninja Forms available. Create a form to enable exports.', 'nf-cpt-xlsx-inline'); ?></p></div>
@@ -150,12 +150,12 @@ function nf_xlsx_render_admin_page() {
                                         <option value="<?php echo esc_attr($id); ?>" <?php selected($selected_id, $id); ?>><?php echo esc_html($title); ?></option>
                                     <?php endforeach; ?>
                                 </select>
-                                <p class="description"><?php esc_html_e('Exports include all field labels, values, and uploaded images.', 'nf-cpt-xlsx-inline'); ?></p>
+                                <p class="description"><?php esc_html_e('Exports include all field labels, values, and uploaded file URLs.', 'nf-cpt-xlsx-inline'); ?></p>
                             </td>
                         </tr>
                     </tbody>
                 </table>
-                <?php submit_button(__('Export submissions', 'nf-cpt-xlsx-inline')); ?>
+                <?php submit_button(__('Export to XLSX', 'nf-cpt-xlsx-inline')); ?>
             </form>
         <?php endif; ?>
     </div>
@@ -301,13 +301,64 @@ function nf_xlsx_get_form_fields($form_id) {
 function nf_xlsx_get_submissions($form_id) {
     global $wpdb;
 
-    $table = $wpdb->prefix . 'nf3_subs';
-    $rows  = $wpdb->get_results(
-        $wpdb->prepare("SELECT id, form_id, sub_date, fields FROM {$table} WHERE form_id = %d ORDER BY sub_date ASC", $form_id),
+    $subs_table = $wpdb->prefix . 'nf3_subs';
+    $rows       = $wpdb->get_results(
+        $wpdb->prepare("SELECT id, sub_date FROM {$subs_table} WHERE form_id = %d ORDER BY sub_date ASC", $form_id),
         ARRAY_A
     );
 
-    return $rows ?: [];
+    if (!$rows) {
+        return [];
+    }
+
+    $submissions = [];
+    $sub_ids     = [];
+
+    foreach ($rows as $row) {
+        $id = (int) $row['id'];
+
+        $submissions[$id] = [
+            'id'       => $id,
+            'sub_date' => $row['sub_date'],
+            'meta'     => [],
+        ];
+
+        $sub_ids[] = $id;
+    }
+
+    if ($sub_ids) {
+        $meta_table   = $wpdb->prefix . 'nf3_sub_meta';
+        $placeholders = implode(',', array_fill(0, count($sub_ids), '%d'));
+        $sql          = "SELECT sub_id, meta_key, meta_value FROM {$meta_table} WHERE sub_id IN ({$placeholders})";
+
+        $args = $sub_ids;
+        array_unshift($args, $sql);
+
+        $prepared = call_user_func_array([$wpdb, 'prepare'], $args);
+
+        if ($prepared) {
+            $meta_rows = $wpdb->get_results($prepared, ARRAY_A);
+
+            if ($meta_rows) {
+                foreach ($meta_rows as $meta_row) {
+                    $sub_id  = (int) $meta_row['sub_id'];
+                    $metaKey = (string) $meta_row['meta_key'];
+
+                    if (!isset($submissions[$sub_id])) {
+                        continue;
+                    }
+
+                    if (!isset($submissions[$sub_id]['meta'][$metaKey])) {
+                        $submissions[$sub_id]['meta'][$metaKey] = [];
+                    }
+
+                    $submissions[$sub_id]['meta'][$metaKey][] = $meta_row['meta_value'];
+                }
+            }
+        }
+    }
+
+    return array_values($submissions);
 }
 
 // -----------------------------------------------------------------------------
@@ -317,36 +368,24 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     $spreadsheet = new Spreadsheet();
     $spreadsheet->getProperties()
         ->setCreator(get_bloginfo('name'))
-        ->setTitle(sprintf(__('Ninja Forms Export – %s', 'nf-cpt-xlsx-inline'), $form['title']))
-        ->setDescription(__('Generated with NF CPT → XLSX Inline Export.', 'nf-cpt-xlsx-inline'));
+        ->setTitle(sprintf(__('NF Submissions Export – %s', 'nf-cpt-xlsx-inline'), $form['title']))
+        ->setDescription(__('Generated with NF Submissions Export.', 'nf-cpt-xlsx-inline'));
 
     $sheet = $spreadsheet->getActiveSheet();
     $sheet->setTitle(__('Submissions', 'nf-cpt-xlsx-inline'));
 
-    $headers = [
-        'submission_id' => __('Submission ID', 'nf-cpt-xlsx-inline'),
-        'submitted_at'  => __('Submitted At', 'nf-cpt-xlsx-inline'),
-    ];
+    $headers = [__('Submission Date', 'nf-cpt-xlsx-inline')];
 
     foreach ($fields as $field) {
-        $column_key = 'field_' . $field['id'];
-        $label      = $field['label'] !== '' ? $field['label'] : $field['key'];
-
-        if (isset($headers[$column_key])) {
-            $label .= ' (' . $field['id'] . ')';
-        }
-
-        $headers[$column_key] = $label;
+        $headers[] = $field['label'] !== '' ? $field['label'] : $field['key'];
     }
 
-    $column = 1;
-    foreach ($headers as $header) {
-        $coordinate = Coordinate::stringFromColumnIndex($column) . '1';
+    foreach ($headers as $index => $header) {
+        $coordinate = Coordinate::stringFromColumnIndex($index + 1) . '1';
         $sheet->setCellValue($coordinate, $header);
         $sheet->getStyle($coordinate)->getFont()->setBold(true);
         $sheet->getStyle($coordinate)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
         $sheet->getStyle($coordinate)->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
-        ++$column;
     }
 
     if (empty($submissions)) {
@@ -359,22 +398,25 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
         $rowIndex = 2;
 
         foreach ($submissions as $submission) {
-            $normalized = nf_xlsx_normalize_submission_fields($submission['fields']);
+            $sheet->setCellValue('A' . $rowIndex, nf_xlsx_format_date($submission['sub_date']));
+            $sheet->getStyle('A' . $rowIndex)->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
+            $sheet->getStyle('A' . $rowIndex)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
 
-            $sheet->setCellValue('A' . $rowIndex, $submission['id']);
-            $sheet->setCellValue('B' . $rowIndex, nf_xlsx_format_date($submission['sub_date']));
+            $columnIndex = 2;
 
-            $columnIndex = 3;
             foreach ($fields as $field) {
                 $coordinate   = Coordinate::stringFromColumnIndex($columnIndex) . $rowIndex;
-                $valuePayload = nf_xlsx_resolve_field_value($field, $normalized);
+                $valuePayload = nf_xlsx_extract_submission_field_payload($submission, $field);
 
                 $sheet->setCellValue($coordinate, $valuePayload['text']);
                 $sheet->getStyle($coordinate)->getAlignment()->setWrapText(true);
                 $sheet->getStyle($coordinate)->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
+                $sheet->getStyle($coordinate)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
 
-                if (!empty($valuePayload['images'])) {
-                    nf_xlsx_embed_images($sheet, $coordinate, $valuePayload['images'], $rowIndex);
+                if (!empty($valuePayload['links'])) {
+                    $cell = $sheet->getCell($coordinate);
+                    $cell->getHyperlink()->setUrl($valuePayload['links'][0]);
+                    $cell->getHyperlink()->setTooltip($valuePayload['links'][0]);
                 }
 
                 ++$columnIndex;
@@ -385,11 +427,10 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
     }
 
     $sheet->freezePane('A2');
-    $sheet->getColumnDimension('A')->setWidth(14);
-    $sheet->getColumnDimension('B')->setWidth(22);
+    $sheet->getColumnDimension('A')->setWidth(22);
 
     $totalColumns = count($headers);
-    for ($index = 3; $index <= $totalColumns; $index++) {
+    for ($index = 2; $index <= $totalColumns; $index++) {
         $sheet->getColumnDimension(Coordinate::stringFromColumnIndex($index))->setWidth(30);
     }
 
@@ -403,102 +444,168 @@ function nf_xlsx_build_workbook(array $form, array $fields, array $submissions) 
 // -----------------------------------------------------------------------------
 // Submission parsing helpers.
 // -----------------------------------------------------------------------------
-function nf_xlsx_normalize_submission_fields($raw) {
-    $fields = maybe_unserialize($raw);
+function nf_xlsx_extract_submission_field_payload(array $submission, array $field) {
+    $meta       = isset($submission['meta']) && is_array($submission['meta']) ? $submission['meta'] : [];
+    $candidates = nf_xlsx_candidate_meta_keys($field);
 
-    if (is_string($fields)) {
-        $decoded = json_decode($fields, true);
-        if (json_last_error() === JSON_ERROR_NONE) {
-            $fields = $decoded;
-        }
-    }
-
-    if (!is_array($fields)) {
-        return [];
-    }
-
-    $normalized = [];
-    foreach ($fields as $field) {
-        if (!is_array($field)) {
+    foreach ($candidates as $candidate) {
+        if (!isset($meta[$candidate])) {
             continue;
         }
 
-        $valuePayload = nf_xlsx_prepare_value_payload($field['value'] ?? '');
-        $keys         = [];
+        $values  = (array) $meta[$candidate];
+        $payload = nf_xlsx_normalize_meta_values($values);
 
-        if (isset($field['id'])) {
-            $keys[] = (string) $field['id'];
-        }
-        if (!empty($field['key'])) {
-            $keys[] = (string) $field['key'];
-        }
-
-        if (!$keys) {
-            continue;
-        }
-
-        foreach ($keys as $key) {
-            if (!isset($normalized[$key])) {
-                $normalized[$key] = $valuePayload;
-            }
+        if ($payload['text'] !== '' || !empty($payload['links'])) {
+            return $payload;
         }
     }
 
-    return $normalized;
+    return ['text' => '', 'links' => []];
 }
 
-function nf_xlsx_resolve_field_value(array $field, array $normalized) {
+function nf_xlsx_candidate_meta_keys(array $field) {
     $candidates = [];
-    $candidates[] = (string) $field['id'];
 
     if (!empty($field['key'])) {
         $candidates[] = (string) $field['key'];
     }
 
-    foreach ($candidates as $candidate) {
-        if (isset($normalized[$candidate])) {
-            return $normalized[$candidate];
+    $candidates[] = (string) $field['id'];
+    $candidates[] = 'field_' . $field['id'];
+    $candidates[] = '_field_' . $field['id'];
+
+    return array_values(array_unique(array_filter($candidates, static function ($value) {
+        return $value !== '';
+    })));
+}
+
+function nf_xlsx_normalize_meta_values(array $values) {
+    $texts = [];
+    $links = [];
+
+    foreach ($values as $value) {
+        $decoded = nf_xlsx_decode_meta_value($value);
+        $payload = nf_xlsx_prepare_value_payload($decoded);
+
+        if ($payload['text'] !== '') {
+            $texts[] = $payload['text'];
+        }
+
+        if (!empty($payload['links'])) {
+            $links = array_merge($links, $payload['links']);
         }
     }
 
-    return ['text' => '', 'images' => []];
+    $texts = array_values(array_filter($texts, static function ($text) {
+        return $text !== '';
+    }));
+    $texts = array_values(array_unique($texts));
+
+    $links = array_values(array_unique($links));
+
+    if (!$texts && $links) {
+        $texts = $links;
+    }
+
+    return [
+        'text'  => $texts ? implode("\n", $texts) : '',
+        'links' => $links,
+    ];
+}
+
+function nf_xlsx_decode_meta_value($value) {
+    if (is_string($value)) {
+        $maybe = maybe_unserialize($value);
+    } else {
+        $maybe = $value;
+    }
+
+    if (is_string($maybe)) {
+        $decoded = json_decode($maybe, true);
+        if (json_last_error() === JSON_ERROR_NONE) {
+            return $decoded;
+        }
+    }
+
+    return $maybe;
 }
 
 function nf_xlsx_prepare_value_payload($value) {
     $payload = [
-        'text'   => '',
-        'images' => [],
+        'text'  => '',
+        'links' => [],
     ];
 
     if (is_array($value)) {
         if (nf_xlsx_is_upload_payload($value)) {
-            $filePath         = nf_xlsx_locate_file_path($value);
-            $payload['text']  = nf_xlsx_guess_file_label($value, $filePath);
-            if ($filePath) {
-                $payload['images'][] = $filePath;
+            $fileUrl         = nf_xlsx_resolve_file_url($value);
+            $payload['text'] = nf_xlsx_guess_file_label($value, $fileUrl);
+
+            if ($payload['text'] === '' && $fileUrl) {
+                $payload['text'] = $fileUrl;
+            }
+
+            if ($fileUrl && nf_xlsx_is_linkable_url($fileUrl)) {
+                $payload['links'][] = $fileUrl;
             }
         } else {
-            $texts  = [];
-            $images = [];
-            foreach ($value as $item) {
+            if (array_key_exists('value', $value)) {
+                $valuePayload = nf_xlsx_prepare_value_payload($value['value']);
+
+                if ($valuePayload['text'] === '' && !empty($value['label']) && is_scalar($value['label'])) {
+                    $valuePayload['text'] = (string) $value['label'];
+                }
+
+                if ($valuePayload['text'] !== '' || !empty($valuePayload['links'])) {
+                    if (!empty($valuePayload['links'])) {
+                        $valuePayload['links'] = array_values(array_unique($valuePayload['links']));
+                    }
+
+                    return $valuePayload;
+                }
+            }
+
+            $texts = [];
+            $links = [];
+
+            foreach ($value as $key => $item) {
+                if ($key === 'value') {
+                    continue;
+                }
+
                 $itemPayload = nf_xlsx_prepare_value_payload($item);
+
                 if ($itemPayload['text'] !== '') {
                     $texts[] = $itemPayload['text'];
                 }
-                if (!empty($itemPayload['images'])) {
-                    $images = array_merge($images, $itemPayload['images']);
+
+                if (!empty($itemPayload['links'])) {
+                    $links = array_merge($links, $itemPayload['links']);
                 }
             }
 
             if ($texts) {
                 $payload['text'] = implode(', ', $texts);
             }
-            if ($images) {
-                $payload['images'] = array_values(array_unique($images));
+
+            if ($links) {
+                $payload['links'] = array_values(array_unique($links));
             }
         }
     } elseif (is_scalar($value)) {
-        $payload['text'] = (string) $value;
+        $string = trim((string) $value);
+        if ($string !== '') {
+            $payload['text'] = $string;
+
+            if (nf_xlsx_is_linkable_url($string)) {
+                $payload['links'][] = $string;
+            }
+        }
+    }
+
+    if (!empty($payload['links'])) {
+        $payload['links'] = array_values(array_unique(array_map('trim', $payload['links'])));
     }
 
     return $payload;
@@ -513,15 +620,158 @@ function nf_xlsx_is_upload_payload(array $value) {
         }
     }
 
+    if (isset($value['value'])) {
+        $maybe = $value['value'];
+
+        if (is_string($maybe) && (nf_xlsx_is_linkable_url($maybe) || nf_xlsx_convert_path_to_url($maybe))) {
+            return true;
+        }
+
+        if (is_array($maybe) && nf_xlsx_is_upload_payload($maybe)) {
+            return true;
+        }
+
+        if (is_array($maybe)) {
+            foreach ($maybe as $subMaybe) {
+                if (is_array($subMaybe) && nf_xlsx_is_upload_payload($subMaybe)) {
+                    return true;
+                }
+
+                if (is_string($subMaybe) && nf_xlsx_is_linkable_url($subMaybe)) {
+                    return true;
+                }
+            }
+        }
+    }
+
     if (isset($value[0]) && is_array($value[0])) {
         foreach ($value[0] as $key => $unused) {
             if (in_array($key, $uploadKeys, true)) {
                 return true;
             }
         }
+
+        if (nf_xlsx_is_upload_payload($value[0])) {
+            return true;
+        }
     }
 
     return false;
+}
+
+function nf_xlsx_resolve_file_url(array $value) {
+    $candidates = [];
+
+    foreach (['url', 'value', 'file_url'] as $key) {
+        if (!empty($value[$key]) && is_string($value[$key])) {
+            $candidates[] = $value[$key];
+        }
+    }
+
+    foreach (['file_path', 'path', 'tmp_name', 'saved_name'] as $key) {
+        if (!empty($value[$key]) && is_string($value[$key])) {
+            $candidates[] = $value[$key];
+        }
+    }
+
+    if (isset($value[0]) && is_array($value[0])) {
+        $nested = nf_xlsx_resolve_file_url($value[0]);
+        if ($nested) {
+            $candidates[] = $nested;
+        }
+    }
+
+    foreach ($candidates as $candidate) {
+        $candidate = trim((string) $candidate);
+
+        if ($candidate === '') {
+            continue;
+        }
+
+        if (nf_xlsx_is_linkable_url($candidate)) {
+            return $candidate;
+        }
+
+        $maybe = nf_xlsx_convert_path_to_url($candidate);
+        if ($maybe && nf_xlsx_is_linkable_url($maybe)) {
+            return $maybe;
+        }
+    }
+
+    $path = nf_xlsx_locate_file_path($value);
+    if ($path) {
+        $maybe = nf_xlsx_convert_path_to_url($path);
+        if ($maybe && nf_xlsx_is_linkable_url($maybe)) {
+            return $maybe;
+        }
+    }
+
+    return '';
+}
+
+function nf_xlsx_convert_path_to_url($path) {
+    if (!is_string($path) || $path === '') {
+        return '';
+    }
+
+    $uploads = wp_upload_dir();
+    if (!empty($uploads['error'])) {
+        return '';
+    }
+
+    $baseDir = wp_normalize_path(trailingslashit($uploads['basedir']));
+    $baseUrl = trailingslashit($uploads['baseurl']);
+    $path    = wp_normalize_path($path);
+
+    if (strpos($path, $baseDir) === 0) {
+        $relative = ltrim(substr($path, strlen($baseDir)), '/');
+        return $baseUrl . str_replace('\\', '/', $relative);
+    }
+
+    if (strpos($path, '/') === 0) {
+        $maybe = $baseDir . ltrim($path, '/');
+        if (file_exists($maybe)) {
+            $normalized = wp_normalize_path($maybe);
+            $relative   = ltrim(substr($normalized, strlen($baseDir)), '/');
+            return $baseUrl . str_replace('\\', '/', $relative);
+        }
+    }
+
+    return '';
+}
+
+function nf_xlsx_guess_file_label($value, $fileReference) {
+    if (is_array($value)) {
+        foreach (['file_name', 'saved_name', 'filename', 'name'] as $key) {
+            if (!empty($value[$key])) {
+                return (string) $value[$key];
+            }
+        }
+
+        if (!empty($value['url'])) {
+            $path = parse_url($value['url'], PHP_URL_PATH);
+            if ($path) {
+                return basename($path);
+            }
+        }
+
+        if (!empty($value['value']) && is_string($value['value'])) {
+            return basename($value['value']);
+        }
+
+        if (isset($value[0]) && is_array($value[0])) {
+            return nf_xlsx_guess_file_label($value[0], $fileReference);
+        }
+    }
+
+    if ($fileReference) {
+        $path = parse_url($fileReference, PHP_URL_PATH);
+        if ($path) {
+            return basename($path);
+        }
+    }
+
+    return '';
 }
 
 function nf_xlsx_locate_file_path($value) {
@@ -577,67 +827,24 @@ function nf_xlsx_locate_file_path($value) {
     return '';
 }
 
-function nf_xlsx_guess_file_label($value, $filePath) {
-    if (is_array($value)) {
-        foreach (['file_name', 'saved_name', 'filename', 'name'] as $key) {
-            if (!empty($value[$key])) {
-                return (string) $value[$key];
-            }
-        }
-
-        if (!empty($value['url'])) {
-            $path = parse_url($value['url'], PHP_URL_PATH);
-            if ($path) {
-                return basename($path);
-            }
-        }
-
-        if (!empty($value['value']) && is_string($value['value'])) {
-            return basename($value['value']);
-        }
-
-        if (isset($value[0]) && is_array($value[0])) {
-            return nf_xlsx_guess_file_label($value[0], $filePath);
-        }
+function nf_xlsx_is_linkable_url($url) {
+    if (!is_string($url) || $url === '') {
+        return false;
     }
 
-    if ($filePath) {
-        return basename($filePath);
+    $url = trim($url);
+    if ($url === '') {
+        return false;
     }
 
-    return '';
-}
-
-function nf_xlsx_embed_images($sheet, $coordinate, array $images, $rowIndex) {
-    if (empty($images)) {
-        return;
+    $path = parse_url($url, PHP_URL_PATH);
+    if (!$path) {
+        return false;
     }
 
-    $maxImages  = 5;
-    $imageCount = min(count($images), $maxImages);
-    $rowHeight  = max(80, $imageCount * 80);
-    $sheet->getRowDimension($rowIndex)->setRowHeight($rowHeight);
+    $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
 
-    $offsetY = 0;
-    foreach ($images as $index => $path) {
-        if ($index >= $maxImages) {
-            break;
-        }
-
-        if (!file_exists($path)) {
-            continue;
-        }
-
-        $drawing = new Drawing();
-        $drawing->setName(basename($path));
-        $drawing->setDescription(basename($path));
-        $drawing->setPath($path);
-        $drawing->setCoordinates($coordinate);
-        $drawing->setOffsetY($offsetY);
-        $drawing->setWorksheet($sheet);
-
-        $offsetY += 80;
-    }
+    return in_array($extension, ['jpg', 'jpeg', 'png', 'pdf'], true);
 }
 
 function nf_xlsx_format_date($date) {
