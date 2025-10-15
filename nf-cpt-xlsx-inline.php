@@ -1,43 +1,44 @@
 <?php
 /**
  * Plugin Name: NF CPT → XLSX Inline Export
- * Description: Export any public CPT to Excel (.xlsx) with PhpSpreadsheet (bundled vendor libraries, no Composer required).
- * Version: 1.1.0
+ * Description: Export Ninja Forms submissions to Excel (.xlsx) with bundled PhpSpreadsheet library.
+ * Version: 2.0.0
  * Author: Your Name
  * License: GPL2
  */
 
-if (!defined('ABSPATH')) exit;
-
-define('NF_CPT_XLSX_INLINE_VERSION', '1.1.0');
+if (!defined('ABSPATH')) {
+    exit;
+}
 
 /* ------------------------------------------------------------
  * 1️⃣ AUTOLOAD LOCAL LIBRARIES
  * ------------------------------------------------------------ */
 function nf_xlsx_load_local_lib() {
     static $registered = false;
+
     if ($registered) {
         return;
     }
 
     $base = plugin_dir_path(__FILE__) . 'lib/';
 
-    // PhpSpreadsheet
     spl_autoload_register(function ($class) use ($base) {
         $prefix = 'PhpOffice\\PhpSpreadsheet\\';
-        $len = strlen($prefix);
+        $len    = strlen($prefix);
+
         if (strncmp($prefix, $class, $len) !== 0) {
             return;
         }
 
         $relative_class = substr($class, $len);
-        $file = $base . 'PhpOffice/PhpSpreadsheet/' . str_replace('\\', '/', $relative_class) . '.php';
+        $file           = $base . 'PhpOffice/PhpSpreadsheet/' . str_replace('\\', '/', $relative_class) . '.php';
+
         if (file_exists($file)) {
             require_once $file;
         }
     });
 
-    // ✅ PSR SimpleCache polyfill
     spl_autoload_register(function ($class) use ($base) {
         if ($class === 'Psr\\SimpleCache\\CacheInterface') {
             $file = $base . 'Psr/SimpleCache/CacheInterface.php';
@@ -47,7 +48,6 @@ function nf_xlsx_load_local_lib() {
         }
     });
 
-    // ✅ Composer\Pcre polyfill
     spl_autoload_register(function ($class) use ($base) {
         if ($class === 'Composer\\Pcre\\Preg') {
             $file = $base . 'Composer/Pcre/Preg.php';
@@ -65,91 +65,111 @@ add_action('plugins_loaded', 'nf_xlsx_load_local_lib', 1);
 /* ------------------------------------------------------------
  * 2️⃣ IMPORT CLASSES
  * ------------------------------------------------------------ */
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
-use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Worksheet\Drawing;
 
 /* ------------------------------------------------------------
- * 3️⃣ ADMIN MENU
+ * 3️⃣ ADMIN MENU & NOTICES
  * ------------------------------------------------------------ */
 add_action('admin_menu', function () {
-    add_menu_page(
-        __('NF CPT → XLSX Export', 'nf-cpt-xlsx-inline'),
-        __('NF → XLSX', 'nf-cpt-xlsx-inline'),
+    add_submenu_page(
+        'ninja-forms',
+        __('Export to XLSX', 'nf-cpt-xlsx-inline'),
+        __('Export to XLSX', 'nf-cpt-xlsx-inline'),
         'manage_options',
         'nf-cpt-xlsx-inline',
-        'nf_cpt_xlsx_inline_admin_page',
-        'dashicons-media-spreadsheet'
+        'nf_cpt_xlsx_inline_admin_page'
     );
 });
 
+add_action('admin_notices', function () {
+    if (!isset($_GET['page']) || $_GET['page'] !== 'nf-cpt-xlsx-inline') {
+        return;
+    }
+
+    if (!empty($_GET['nf_xlsx_notice']) && $_GET['nf_xlsx_notice'] === 'success') {
+        $fileParam = isset($_GET['nf_xlsx_file']) ? wp_unslash($_GET['nf_xlsx_file']) : '';
+        $file = $fileParam ? sanitize_file_name(rawurldecode($fileParam)) : '';
+        if ($file) {
+            $uploads = wp_upload_dir();
+            $url     = trailingslashit($uploads['url']) . $file;
+
+            printf(
+                '<div class="notice notice-success"><p>%s <a href="%s">%s</a></p></div>',
+                esc_html__('Excel export completed successfully.', 'nf-cpt-xlsx-inline'),
+                esc_url($url),
+                esc_html__('Download file', 'nf-cpt-xlsx-inline')
+            );
+        } else {
+            printf(
+                '<div class="notice notice-success"><p>%s</p></div>',
+                esc_html__('Excel export completed successfully.', 'nf-cpt-xlsx-inline')
+            );
+        }
+    }
+
+    if (!empty($_GET['nf_xlsx_notice']) && $_GET['nf_xlsx_notice'] === 'error') {
+        $messageParam = isset($_GET['nf_xlsx_message']) ? wp_unslash($_GET['nf_xlsx_message']) : '';
+        $decodedMessage = $messageParam ? rawurldecode($messageParam) : '';
+        $message = $decodedMessage ? wp_strip_all_tags($decodedMessage) : __('Unknown error.', 'nf-cpt-xlsx-inline');
+        printf(
+            '<div class="notice notice-error"><p>%s</p></div>',
+            esc_html($message)
+        );
+    }
+});
+
 /* ------------------------------------------------------------
- * 4️⃣ PAGE
+ * 4️⃣ ADMIN PAGE
  * ------------------------------------------------------------ */
 function nf_cpt_xlsx_inline_admin_page() {
     if (!current_user_can('manage_options')) {
         wp_die(__('You are not allowed to access this page.', 'nf-cpt-xlsx-inline'));
     }
 
-    $post_types = nf_cpt_xlsx_inline_get_exportable_post_types();
-    $current = isset($_GET['nf_cpt']) ? sanitize_key(wp_unslash($_GET['nf_cpt'])) : 'post';
-    if (!isset($post_types[$current])) {
-        $current = 'post';
-    }
+    $forms = nf_cpt_xlsx_inline_get_forms();
+    $current_form = isset($_GET['form_id']) ? absint($_GET['form_id']) : 0;
 
     ?>
     <div class="wrap">
-        <h1><?php esc_html_e('NF CPT → XLSX Export', 'nf-cpt-xlsx-inline'); ?></h1>
-        <p><?php esc_html_e('Generate an Excel spreadsheet with entries from your chosen custom post type. The export is generated inline with bundled PhpSpreadsheet libraries (no Composer required).', 'nf-cpt-xlsx-inline'); ?></p>
+        <h1><?php esc_html_e('Ninja Forms → Export to XLSX', 'nf-cpt-xlsx-inline'); ?></h1>
+        <p><?php esc_html_e('Generate an Excel workbook of Ninja Forms submissions. Uploaded images are embedded directly in the sheet.', 'nf-cpt-xlsx-inline'); ?></p>
 
-        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-            <?php wp_nonce_field('nf_cpt_xlsx_inline_export', '_nf_cpt_nonce'); ?>
-            <input type="hidden" name="action" value="nf_cpt_export_xlsx" />
-
-            <table class="form-table" role="presentation">
-                <tbody>
-                    <tr>
-                        <th scope="row"><label for="nf-cpt-xlsx-post-type"><?php esc_html_e('Post Type', 'nf-cpt-xlsx-inline'); ?></label></th>
-                        <td>
-                            <select id="nf-cpt-xlsx-post-type" name="post_type">
-                                <?php foreach ($post_types as $slug => $label) : ?>
-                                    <option value="<?php echo esc_attr($slug); ?>" <?php selected($slug, $current); ?>><?php echo esc_html($label); ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                            <p class="description"><?php esc_html_e('Only public post types are listed. Use the filter "nf_cpt_xlsx_inline_post_types" to modify.', 'nf-cpt-xlsx-inline'); ?></p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row"><?php esc_html_e('Fields', 'nf-cpt-xlsx-inline'); ?></th>
-                        <td>
-                            <p class="description"><?php esc_html_e('The export contains ID, Title, Status, Author, Date and Permalink columns by default. Hook into "nf_cpt_xlsx_inline_headers" or "nf_cpt_xlsx_inline_row" to customize.', 'nf-cpt-xlsx-inline'); ?></p>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-
-            <?php submit_button(__('Export to XLSX', 'nf-cpt-xlsx-inline')); ?>
-        </form>
+        <?php if (empty($forms)) : ?>
+            <div class="notice notice-warning"><p><?php esc_html_e('No Ninja Forms found. Create a form to enable exports.', 'nf-cpt-xlsx-inline'); ?></p></div>
+        <?php else : ?>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <?php wp_nonce_field('nf_cpt_xlsx_inline_export', '_nf_cpt_nonce'); ?>
+                <input type="hidden" name="action" value="nf_cpt_export_to_xlsx" />
+                <table class="form-table" role="presentation">
+                    <tbody>
+                        <tr>
+                            <th scope="row"><label for="nf-cpt-xlsx-form-id"><?php esc_html_e('Select form', 'nf-cpt-xlsx-inline'); ?></label></th>
+                            <td>
+                                <select id="nf-cpt-xlsx-form-id" name="form_id">
+                                    <?php foreach ($forms as $form_id => $form_title) : ?>
+                                        <option value="<?php echo esc_attr($form_id); ?>" <?php selected($current_form, $form_id); ?>><?php echo esc_html($form_title); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <p class="description"><?php esc_html_e('Exports include all submission fields and uploaded images.', 'nf-cpt-xlsx-inline'); ?></p>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+                <?php submit_button(__('Export submissions', 'nf-cpt-xlsx-inline')); ?>
+            </form>
+        <?php endif; ?>
     </div>
     <?php
 }
 
 /* ------------------------------------------------------------
- * 5️⃣ HELPER: Convert col/row to address
+ * 5️⃣ EXPORT HANDLER
  * ------------------------------------------------------------ */
-function nf_xlsx_colrow_to_address($col, $row) {
-    $letter = '';
-    while ($col > 0) {
-        $mod = ($col - 1) % 26;
-        $letter = chr(65 + $mod) . $letter;
-        $col = (int)(($col - $mod) / 26);
-    }
-    return $letter . $row;
-}
-
-/* ------------------------------------------------------------
- * 6️⃣ EXPORT HANDLER
- * ------------------------------------------------------------ */
-add_action('admin_post_nf_cpt_export_xlsx', 'nf_cpt_xlsx_inline_export');
+add_action('admin_post_nf_cpt_export_to_xlsx', 'nf_cpt_xlsx_inline_export');
 
 function nf_cpt_xlsx_inline_export() {
     if (!current_user_can('manage_options')) {
@@ -158,160 +178,476 @@ function nf_cpt_xlsx_inline_export() {
 
     check_admin_referer('nf_cpt_xlsx_inline_export', '_nf_cpt_nonce');
 
-    $post_type = isset($_REQUEST['post_type']) ? sanitize_key(wp_unslash($_REQUEST['post_type'])) : 'post';
-    $post_types = nf_cpt_xlsx_inline_get_exportable_post_types();
-    if (!isset($post_types[$post_type])) {
-        $post_type = 'post';
+    $form_id = isset($_POST['form_id']) ? absint($_POST['form_id']) : 0;
+
+    if (!$form_id) {
+        nf_cpt_xlsx_inline_redirect_error(__('Invalid form selection.', 'nf-cpt-xlsx-inline'));
     }
 
     try {
-        [$headers, $rows] = nf_cpt_xlsx_inline_dataset($post_type);
-
-        if (empty($headers)) {
-            $headers = ['Message'];
-            $rows = [['No data available for export.']];
+        $form = nf_cpt_xlsx_inline_get_form($form_id);
+        if (!$form) {
+            nf_cpt_xlsx_inline_redirect_error(__('Selected form does not exist.', 'nf-cpt-xlsx-inline'));
         }
 
-        $spreadsheet = new Spreadsheet();
-        $spreadsheet->getProperties()
-            ->setCreator(get_bloginfo('name'))
-            ->setTitle(sprintf(__('Export: %s', 'nf-cpt-xlsx-inline'), $post_types[$post_type]))
-            ->setDescription(__('Generated with NF CPT → XLSX Inline Export', 'nf-cpt-xlsx-inline'));
+        $spreadsheet = nf_cpt_xlsx_inline_build_spreadsheet($form_id, $form['title']);
 
-        $sheet = $spreadsheet->getActiveSheet();
-        $sheet->setTitle(apply_filters('nf_cpt_xlsx_inline_sheet_title', 'Data Export', $post_type));
+        $filename = sprintf('nf-export-%d-%s.xlsx', $form_id, gmdate('Y-m-d-H-i'));
+        $uploads  = wp_upload_dir();
 
-        // Header row.
-        $rowIndex = 1;
-        foreach (array_values($headers) as $colIndex => $header) {
-            $sheet->setCellValueByColumnAndRow($colIndex + 1, $rowIndex, $header);
-            $sheet->getStyleByColumnAndRow($colIndex + 1, $rowIndex)->getFont()->setBold(true);
+        if (!empty($uploads['error'])) {
+            throw new RuntimeException($uploads['error']);
         }
 
-        // Data rows.
-        $rowIndex = 2;
-        foreach ($rows as $row) {
-            $colIndex = 1;
-            foreach ($headers as $key => $label) {
-                $value = isset($row[$key]) ? $row[$key] : '';
-                $sheet->setCellValueByColumnAndRow($colIndex, $rowIndex, $value);
-                ++$colIndex;
-            }
-            ++$rowIndex;
+        if (!wp_mkdir_p($uploads['path'])) {
+            throw new RuntimeException(__('Unable to create upload directory.', 'nf-cpt-xlsx-inline'));
         }
 
-        // Autosize columns for readability.
-        foreach (range(1, count($headers)) as $column) {
-            $sheet->getColumnDimensionByColumn($column)->setAutoSize(true);
-        }
+        $filepath = trailingslashit($uploads['path']) . $filename;
 
-        // Freeze top row (headers).
-        $sheet->freezePane('A2');
-
-        // Styling (optional border for data table).
-        if (!empty($rows) && class_exists('PhpOffice\\PhpSpreadsheet\\Style\\Border')) {
-            $lastColumnLetter = nf_xlsx_colrow_to_address(count($headers), 1);
-            $lastColumnLetter = preg_replace('/\d+/', '', $lastColumnLetter);
-            $range = sprintf('A1:%s%d', $lastColumnLetter, count($rows) + 1);
-            $sheet->getStyle($range)
-                ->getBorders()
-                ->getAllBorders()
-                ->setBorderStyle(\PhpOffice\PhpSpreadsheet\Style\Border::BORDER_THIN);
-        }
-
-        while (ob_get_level()) {
-            ob_end_clean();
-        }
-
-        nocache_headers();
-        header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        header('Content-Disposition: attachment; filename="' . sanitize_file_name($post_type . '-export.xlsx') . '"');
-        header('Cache-Control: max-age=0, no-cache, no-store, must-revalidate');
-
-        $writer = new Xlsx($spreadsheet);
-        $writer->save('php://output');
-
+        $writer = IOFactory::createWriter($spreadsheet, 'Xlsx');
+        $writer->setPreCalculateFormulas(false);
+        $writer->save($filepath);
         $spreadsheet->disconnectWorksheets();
+
+        $redirect_url = add_query_arg(
+            [
+                'page'             => 'nf-cpt-xlsx-inline',
+                'form_id'          => $form_id,
+                'nf_xlsx_notice'   => 'success',
+                'nf_xlsx_file'     => rawurlencode($filename),
+            ],
+            admin_url('admin.php')
+        );
+
+        wp_safe_redirect($redirect_url);
         exit;
-    } catch (Throwable $e) {
-        error_log('NF XLSX EXPORT ERROR: ' . $e->getMessage());
-        wp_die('<strong>' . esc_html__('NF XLSX Export Error:', 'nf-cpt-xlsx-inline') . '</strong><br>' . esc_html($e->getMessage()));
+    } catch (Throwable $exception) {
+        error_log('NF XLSX Export Error: ' . $exception->getMessage());
+        nf_cpt_xlsx_inline_redirect_error($exception->getMessage());
     }
+}
+
+function nf_cpt_xlsx_inline_redirect_error($message) {
+    $redirect_url = add_query_arg(
+        [
+            'page'             => 'nf-cpt-xlsx-inline',
+            'nf_xlsx_notice'   => 'error',
+            'nf_xlsx_message'  => rawurlencode($message),
+        ],
+        admin_url('admin.php')
+    );
+
+    wp_safe_redirect($redirect_url);
+    exit;
 }
 
 /* ------------------------------------------------------------
- * 7️⃣ DATASET HELPERS
+ * 6️⃣ DATA HELPERS
  * ------------------------------------------------------------ */
+function nf_cpt_xlsx_inline_get_forms() {
+    global $wpdb;
 
-function nf_cpt_xlsx_inline_get_exportable_post_types() {
-    $post_types = get_post_types(
-        [
-            'public'  => true,
-            'show_ui' => true,
-        ],
-        'objects'
-    );
+    $table = $wpdb->prefix . 'nf3_forms';
+    $rows  = $wpdb->get_results("SELECT id, title FROM {$table} ORDER BY title ASC", ARRAY_A);
 
-    $choices = [];
-    foreach ($post_types as $type) {
-        $choices[$type->name] = $type->labels->name;
+    $forms = [];
+
+    if ($rows) {
+        foreach ($rows as $row) {
+            $forms[(int) $row['id']] = $row['title'];
+        }
     }
 
-    /**
-     * Filter the list of post types available for export.
-     *
-     * @param array $choices Key => label pairs.
-     */
-    return apply_filters('nf_cpt_xlsx_inline_post_types', $choices);
+    return $forms;
 }
 
-function nf_cpt_xlsx_inline_dataset($post_type) {
-    $args = [
-        'post_type'      => $post_type,
-        'post_status'    => 'any',
-        'posts_per_page' => apply_filters('nf_cpt_xlsx_inline_posts_per_page', -1, $post_type),
-        'orderby'        => 'date',
-        'order'          => 'DESC',
+function nf_cpt_xlsx_inline_get_form($form_id) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'nf3_forms';
+    $row   = $wpdb->get_row($wpdb->prepare("SELECT id, title FROM {$table} WHERE id = %d", $form_id), ARRAY_A);
+
+    if (!$row) {
+        return null;
+    }
+
+    return [
+        'id'    => (int) $row['id'],
+        'title' => $row['title'],
     ];
+}
 
-    $args = apply_filters('nf_cpt_xlsx_inline_query_args', $args, $post_type);
+function nf_cpt_xlsx_inline_get_form_fields($form_id) {
+    global $wpdb;
 
-    $posts = get_posts($args);
+    $table = $wpdb->prefix . 'nf3_fields';
+    $rows  = $wpdb->get_results(
+        $wpdb->prepare("SELECT id, `key`, label, type FROM {$table} WHERE parent_id = %d ORDER BY id ASC", $form_id),
+        ARRAY_A
+    );
+
+    $fields = [];
+
+    if ($rows) {
+        foreach ($rows as $row) {
+            $fields[] = [
+                'id'    => (int) $row['id'],
+                'key'   => $row['key'],
+                'label' => $row['label'] !== '' ? $row['label'] : $row['key'],
+                'type'  => $row['type'],
+            ];
+        }
+    }
+
+    return $fields;
+}
+
+function nf_cpt_xlsx_inline_get_submissions($form_id) {
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'nf3_subs';
+    $rows  = $wpdb->get_results(
+        $wpdb->prepare("SELECT id, form_id, sub_date, fields FROM {$table} WHERE form_id = %d ORDER BY sub_date ASC", $form_id),
+        ARRAY_A
+    );
+
+    return $rows ? $rows : [];
+}
+
+function nf_cpt_xlsx_inline_build_spreadsheet($form_id, $form_title) {
+    $fields      = nf_cpt_xlsx_inline_get_form_fields($form_id);
+    $submissions = nf_cpt_xlsx_inline_get_submissions($form_id);
+
+    $spreadsheet = new Spreadsheet();
+    $spreadsheet->getProperties()
+        ->setCreator(get_bloginfo('name'))
+        ->setTitle(sprintf(__('Ninja Forms Export – %s', 'nf-cpt-xlsx-inline'), $form_title))
+        ->setDescription(__('Generated with NF CPT → XLSX Inline Export.', 'nf-cpt-xlsx-inline'));
+
+    $sheet = $spreadsheet->getActiveSheet();
+    $sheet->setTitle(__('Submissions', 'nf-cpt-xlsx-inline'));
 
     $headers = [
-        'id'        => __('ID', 'nf-cpt-xlsx-inline'),
-        'title'     => __('Title', 'nf-cpt-xlsx-inline'),
-        'status'    => __('Status', 'nf-cpt-xlsx-inline'),
-        'author'    => __('Author', 'nf-cpt-xlsx-inline'),
-        'date'      => __('Date', 'nf-cpt-xlsx-inline'),
-        'permalink' => __('Permalink', 'nf-cpt-xlsx-inline'),
+        'submission_id' => __('Submission ID', 'nf-cpt-xlsx-inline'),
+        'submitted_at'  => __('Submitted At', 'nf-cpt-xlsx-inline'),
     ];
 
-    $headers = apply_filters('nf_cpt_xlsx_inline_headers', $headers, $post_type);
+    foreach ($fields as $field) {
+        $headers['field_' . $field['id']] = $field['label'];
+    }
 
-    $rows = [];
-    foreach ($posts as $post) {
-        $row = [
-            'id'        => $post->ID,
-            'title'     => get_the_title($post),
-            'status'    => $post->post_status,
-            'author'    => get_the_author_meta('display_name', $post->post_author),
-            'date'      => get_the_date('', $post),
-            'permalink' => get_permalink($post),
-        ];
+    $columnIndex = 1;
+    foreach ($headers as $header) {
+        $coordinate = Coordinate::stringFromColumnIndex($columnIndex) . '1';
+        $sheet->setCellValue($coordinate, $header);
+        $sheet->getStyle($coordinate)->getFont()->setBold(true);
+        $sheet->getStyle($coordinate)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        $sheet->getStyle($coordinate)->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
+        ++$columnIndex;
+    }
 
-        $row = apply_filters('nf_cpt_xlsx_inline_row', $row, $post, $post_type);
+    if (empty($submissions)) {
+        $sheet->setCellValue('A2', __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
+        $sheet->mergeCells('A2:' . Coordinate::stringFromColumnIndex(count($headers)) . '2');
+        $sheet->getStyle('A2')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        $sheet->getRowDimension(2)->setRowHeight(24);
+    } else {
+        $rowIndex = 2;
 
-        // Guarantee all headers exist as keys.
-        foreach ($headers as $key => $label) {
-            if (!array_key_exists($key, $row)) {
-                $row[$key] = '';
+        foreach ($submissions as $submission) {
+            $normalized = nf_cpt_xlsx_inline_normalize_submission_fields($submission['fields']);
+            $sheet->setCellValue('A' . $rowIndex, $submission['id']);
+            $sheet->setCellValue('B' . $rowIndex, nf_cpt_xlsx_inline_format_date($submission['sub_date']));
+
+            $columnIndex = 3;
+            foreach ($fields as $field) {
+                $coordinate = Coordinate::stringFromColumnIndex($columnIndex) . $rowIndex;
+                $valuePayload = nf_cpt_xlsx_inline_extract_value($field, $normalized);
+                $sheet->setCellValue($coordinate, $valuePayload['text']);
+                $sheet->getStyle($coordinate)->getAlignment()->setWrapText(true);
+                $sheet->getStyle($coordinate)->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
+
+                if (!empty($valuePayload['images'])) {
+                    nf_cpt_xlsx_inline_embed_images($sheet, $coordinate, $valuePayload['images'], $rowIndex);
+                }
+
+                ++$columnIndex;
+            }
+
+            ++$rowIndex;
+        }
+    }
+
+    // Styling adjustments.
+    $sheet->freezePane('A2');
+    $sheet->getColumnDimension('A')->setWidth(14);
+    $sheet->getColumnDimension('B')->setWidth(22);
+
+    $totalColumns = count($headers);
+    for ($index = 3; $index <= $totalColumns; $index++) {
+        $columnLetter = Coordinate::stringFromColumnIndex($index);
+        $sheet->getColumnDimension($columnLetter)->setWidth(30);
+    }
+
+    $lastColumn = Coordinate::stringFromColumnIndex($totalColumns);
+    $lastRow    = max(2, count($submissions) + 1);
+    $range      = 'A1:' . $lastColumn . $lastRow;
+
+    $sheet->getStyle($range)->getAlignment()->setWrapText(true);
+
+    return $spreadsheet;
+}
+
+function nf_cpt_xlsx_inline_normalize_submission_fields($raw_fields) {
+    $fields = maybe_unserialize($raw_fields);
+
+    if (is_string($fields)) {
+        $decoded = json_decode($fields, true);
+        if (json_last_error() === JSON_ERROR_NONE) {
+            $fields = $decoded;
+        }
+    }
+
+    if (!is_array($fields)) {
+        return [];
+    }
+
+    $normalized = [];
+
+    foreach ($fields as $field) {
+        if (!is_array($field)) {
+            continue;
+        }
+
+        $valuePayload = nf_cpt_xlsx_inline_prepare_value_payload(isset($field['value']) ? $field['value'] : '');
+        $keys = [];
+
+        if (isset($field['id'])) {
+            $keys[] = (string) $field['id'];
+        }
+        if (!empty($field['key'])) {
+            $keys[] = (string) $field['key'];
+        }
+
+        if (empty($keys)) {
+            continue;
+        }
+
+        foreach ($keys as $key) {
+            $normalized[$key] = $valuePayload;
+        }
+    }
+
+    return $normalized;
+}
+
+function nf_cpt_xlsx_inline_prepare_value_payload($value) {
+    $payload = [
+        'text'   => '',
+        'images' => [],
+    ];
+
+    if (is_array($value)) {
+        // File uploads or multiple selections.
+        if (nf_cpt_xlsx_inline_is_upload_payload($value)) {
+            $filePath = nf_cpt_xlsx_inline_locate_file_path($value);
+            if ($filePath) {
+                $payload['images'][] = $filePath;
+            }
+
+            $payload['text'] = nf_cpt_xlsx_inline_guess_file_label($value, $filePath);
+        } else {
+            $texts  = [];
+            $images = [];
+
+            foreach ($value as $item) {
+                $itemPayload = nf_cpt_xlsx_inline_prepare_value_payload($item);
+                if ($itemPayload['text'] !== '') {
+                    $texts[] = $itemPayload['text'];
+                }
+                if (!empty($itemPayload['images'])) {
+                    $images = array_merge($images, $itemPayload['images']);
+                }
+            }
+
+            if ($texts) {
+                $payload['text'] = implode(', ', $texts);
+            }
+            if ($images) {
+                $payload['images'] = array_values(array_unique($images));
+            }
+        }
+    } elseif (is_scalar($value)) {
+        $payload['text'] = (string) $value;
+    }
+
+    return $payload;
+}
+
+function nf_cpt_xlsx_inline_is_upload_payload(array $value) {
+    $upload_keys = ['tmp_name', 'file_path', 'file_name', 'url', 'path', 'saved_name'];
+    foreach ($upload_keys as $key) {
+        if (array_key_exists($key, $value)) {
+            return true;
+        }
+    }
+
+    // Ninja Forms file upload stores entries as arrays containing arrays with these keys.
+    if (isset($value[0]) && is_array($value[0])) {
+        foreach ($value[0] as $key => $unused) {
+            if (in_array($key, $upload_keys, true)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+function nf_cpt_xlsx_inline_locate_file_path($value) {
+    $candidates = [];
+
+    if (is_array($value)) {
+        foreach (['file_path', 'path', 'tmp_name', 'value'] as $key) {
+            if (!empty($value[$key]) && is_string($value[$key])) {
+                $candidates[] = $value[$key];
             }
         }
 
-        $rows[] = $row;
+        if (!empty($value['url']) && is_string($value['url'])) {
+            $candidates[] = $value['url'];
+        }
+
+        if (isset($value[0]) && is_array($value[0])) {
+            $inner = nf_cpt_xlsx_inline_locate_file_path($value[0]);
+            if ($inner) {
+                $candidates[] = $inner;
+            }
+        }
+    } elseif (is_string($value)) {
+        $candidates[] = $value;
     }
 
-    return [$headers, $rows];
+    $uploads = wp_upload_dir();
+    $baseDir = trailingslashit($uploads['basedir']);
+    $baseUrl = trailingslashit($uploads['baseurl']);
+
+    foreach ($candidates as $candidate) {
+        $candidate = trim($candidate);
+        if (!$candidate) {
+            continue;
+        }
+
+        if (file_exists($candidate)) {
+            return realpath($candidate);
+        }
+
+        if (strpos($candidate, $baseUrl) === 0) {
+            $maybe = $baseDir . ltrim(substr($candidate, strlen($baseUrl)), '/');
+            if (file_exists($maybe)) {
+                return realpath($maybe);
+            }
+        }
+
+        // Allow relative paths from uploads directory.
+        $maybe = $baseDir . ltrim($candidate, '/');
+        if (file_exists($maybe)) {
+            return realpath($maybe);
+        }
+    }
+
+    return '';
 }
 
+function nf_cpt_xlsx_inline_guess_file_label($value, $filePath) {
+    if (is_array($value)) {
+        foreach (['file_name', 'saved_name', 'filename', 'name'] as $key) {
+            if (!empty($value[$key])) {
+                return (string) $value[$key];
+            }
+        }
+
+        if (!empty($value['url'])) {
+            return basename(parse_url($value['url'], PHP_URL_PATH));
+        }
+
+        if (!empty($value['value']) && is_string($value['value'])) {
+            return basename($value['value']);
+        }
+
+        if (isset($value[0]) && is_array($value[0])) {
+            return nf_cpt_xlsx_inline_guess_file_label($value[0], $filePath);
+        }
+    }
+
+    if ($filePath) {
+        return basename($filePath);
+    }
+
+    return '';
+}
+
+function nf_cpt_xlsx_inline_extract_value($field, $normalized) {
+    $payload = ['text' => '', 'images' => []];
+
+    $candidates = [];
+    $candidates[] = (string) $field['id'];
+
+    if (!empty($field['key'])) {
+        $candidates[] = (string) $field['key'];
+    }
+
+    foreach ($candidates as $candidate) {
+        if (isset($normalized[$candidate])) {
+            $payload = $normalized[$candidate];
+            break;
+        }
+    }
+
+    return $payload;
+}
+
+function nf_cpt_xlsx_inline_embed_images($sheet, $coordinate, array $images, $rowIndex) {
+    if (empty($images)) {
+        return;
+    }
+
+    $maxImages = 5; // Safety guard.
+    $offset = 0;
+    $imageCount = min(count($images), $maxImages);
+    $rowHeight = max(80, $imageCount * 80);
+    $sheet->getRowDimension($rowIndex)->setRowHeight($rowHeight);
+
+    foreach ($images as $index => $path) {
+        if ($index >= $maxImages) {
+            break;
+        }
+
+        if (!file_exists($path)) {
+            continue;
+        }
+
+        $drawing = new Drawing();
+        $drawing->setName(basename($path));
+        $drawing->setDescription(basename($path));
+        $drawing->setPath($path);
+        $drawing->setCoordinates($coordinate);
+        $drawing->setOffsetY($offset);
+        $drawing->setWorksheet($sheet);
+        $offset += 80;
+    }
+}
+
+function nf_cpt_xlsx_inline_format_date($date) {
+    if (!$date) {
+        return '';
+    }
+
+    $timestamp = strtotime($date);
+    if (!$timestamp) {
+        return $date;
+    }
+
+    return wp_date(get_option('date_format') . ' ' . get_option('time_format'), $timestamp);
+}
