@@ -77,10 +77,7 @@ function nf_xlsx_register_local_autoloaders() {
 }
 add_action('plugins_loaded', 'nf_xlsx_register_local_autoloaders', 1);
 
-use PhpOffice\PhpSpreadsheet\IOFactory;
-use PhpOffice\PhpSpreadsheet\Spreadsheet;
-use PhpOffice\PhpSpreadsheet\Style\Alignment;
-use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
+require_once __DIR__ . '/class-nf-xlsx-stream-exporter.php';
 
 // -----------------------------------------------------------------------------
 // Admin UI registration.
@@ -332,7 +329,7 @@ function nf_xlsx_handle_export() {
 
         $submissions = nf_xlsx_get_submissions($form_id);
 
-        $spreadsheet = nf_xlsx_build_workbook($form, $fields, $submissions, $selectedColumns);
+        $exporter = nf_xlsx_build_workbook($form, $fields, $submissions, $selectedColumns);
 
         $filename = sprintf('nf-export-%d-%s.xlsx', (int) $form_id, gmdate('Y-m-d-H-i'));
         $uploads  = wp_upload_dir();
@@ -347,11 +344,7 @@ function nf_xlsx_handle_export() {
 
         $filepath = trailingslashit($uploads['path']) . $filename;
 
-        $writer = IOFactory::createWriter($spreadsheet, 'Xlsx');
-        $writer->setPreCalculateFormulas(false);
-        $writer->save($filepath);
-        $spreadsheet->disconnectWorksheets();
-        unset($spreadsheet);
+        $exporter->save($filepath);
 
         $redirectArgs = [
             'page'           => 'nf-cpt-xlsx-inline',
@@ -538,86 +531,13 @@ function nf_xlsx_get_submissions($form_id, $limit = 0) {
 // Spreadsheet builder.
 // -----------------------------------------------------------------------------
 function nf_xlsx_build_workbook(array $form, array $fields, array $submissions, array $selectedColumnIds) {
-    $spreadsheet = new Spreadsheet();
-    $spreadsheet->getProperties()
-        ->setCreator(get_bloginfo('name'))
-        ->setTitle(sprintf(__('NF Submissions Export – %s', 'nf-cpt-xlsx-inline'), $form['title']))
-        ->setDescription(__('Generated with NF Submissions Export.', 'nf-cpt-xlsx-inline'));
-
-    $sheet = $spreadsheet->getActiveSheet();
-    $sheet->setTitle(__('Submissions', 'nf-cpt-xlsx-inline'));
-
     $columns = nf_xlsx_prepare_columns($fields, $selectedColumnIds);
 
     if (!$columns) {
         throw new RuntimeException(__('No columns selected for export.', 'nf-cpt-xlsx-inline'));
     }
 
-    foreach ($columns as $column) {
-        nf_safe_set($sheet, $column['index'], 1, $column['header']);
-        $coordinate = nf_addr($column['index'], 1);
-        $style      = $sheet->getStyle($coordinate);
-        $style->getFont()->setBold(true);
-        $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-        $style->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
-    }
-
-    if (empty($submissions)) {
-        $firstColumn     = $columns[0];
-        $lastColumn      = end($columns);
-        nf_safe_set($sheet, $firstColumn['index'], 2, __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
-        $firstCoordinate = nf_addr($firstColumn['index'], 2);
-        $sheet->mergeCells(nf_addr($firstColumn['index'], 2) . ':' . nf_addr($lastColumn['index'], 2));
-        $sheet->getStyle($firstCoordinate)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-        $sheet->getRowDimension(2)->setRowHeight(24);
-        reset($columns);
-    } else {
-        $rowIndex = 2;
-
-        foreach ($submissions as $submission) {
-            foreach ($columns as $column) {
-                if ($column['field'] === null) {
-                    nf_safe_set($sheet, $column['index'], $rowIndex, nf_xlsx_format_date($submission['sub_date']));
-                    $coordinate = nf_addr($column['index'], $rowIndex);
-                    $style      = $sheet->getStyle($coordinate);
-                    $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
-                    $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-                    continue;
-                }
-
-                $valuePayload = nf_xlsx_extract_submission_field_payload($submission, $column['field']);
-
-                nf_safe_set($sheet, $column['index'], $rowIndex, $valuePayload['text']);
-                $coordinate = nf_addr($column['index'], $rowIndex);
-                $style      = $sheet->getStyle($coordinate);
-                $style->getAlignment()->setWrapText(true);
-                $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
-                $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-
-                if (!empty($valuePayload['links'])) {
-                    $cell = $sheet->getCell($coordinate);
-                    $cell->getHyperlink()->setUrl($valuePayload['links'][0]);
-                    $cell->getHyperlink()->setTooltip($valuePayload['links'][0]);
-                }
-            }
-
-            ++$rowIndex;
-        }
-    }
-
-    $sheet->freezePane('A2');
-
-    foreach ($columns as $column) {
-        $dimension = $sheet->getColumnDimension(nf_col_from_index($column['index']));
-        $dimension->setWidth($column['field'] === null ? 22 : 30);
-    }
-
-    $lastColumn = end($columns);
-    $lastRow    = max(2, count($submissions) + 1);
-    $sheet->getStyle(nf_addr($columns[0]['index'], 1) . ':' . nf_addr($lastColumn['index'], $lastRow))->getAlignment()->setWrapText(true);
-    reset($columns);
-
-    return $spreadsheet;
+    return new NF_XLSX_Stream_Exporter($form, $columns, $submissions);
 }
 
 function nf_xlsx_prepare_columns(array $fields, array $selectedColumnIds = []) {
@@ -747,7 +667,7 @@ function nf_xlsx_extract_submission_field_payload(array $submission, array $fiel
         }
     }
 
-    return ['text' => '', 'links' => []];
+    return ['text' => '', 'links' => [], 'images' => [], 'pdfs' => []];
 }
 
 function nf_xlsx_candidate_meta_keys(array $field) {
@@ -767,8 +687,10 @@ function nf_xlsx_candidate_meta_keys(array $field) {
 }
 
 function nf_xlsx_normalize_meta_values(array $values) {
-    $texts = [];
-    $links = [];
+    $texts  = [];
+    $links  = [];
+    $images = [];
+    $pdfs   = [];
 
     foreach ($values as $value) {
         $decoded = nf_xlsx_decode_meta_value($value);
@@ -781,6 +703,14 @@ function nf_xlsx_normalize_meta_values(array $values) {
         if (!empty($payload['links'])) {
             $links = array_merge($links, $payload['links']);
         }
+
+        if (!empty($payload['images'])) {
+            $images = array_merge($images, $payload['images']);
+        }
+
+        if (!empty($payload['pdfs'])) {
+            $pdfs = array_merge($pdfs, $payload['pdfs']);
+        }
     }
 
     $texts = array_values(array_filter($texts, static function ($text) {
@@ -789,14 +719,18 @@ function nf_xlsx_normalize_meta_values(array $values) {
     $texts = array_values(array_unique($texts));
 
     $links = array_values(array_unique($links));
+    $images = array_values(array_unique($images));
+    $pdfs   = array_values(array_unique($pdfs));
 
     if (!$texts && $links) {
         $texts = $links;
     }
 
     return [
-        'text'  => $texts ? implode("\n", $texts) : '',
-        'links' => $links,
+        'text'   => $texts ? implode("\n", $texts) : '',
+        'links'  => $links,
+        'images' => $images,
+        'pdfs'   => $pdfs,
     ];
 }
 
@@ -819,8 +753,10 @@ function nf_xlsx_decode_meta_value($value) {
 
 function nf_xlsx_prepare_value_payload($value) {
     $payload = [
-        'text'  => '',
-        'links' => [],
+        'text'   => '',
+        'links'  => [],
+        'images' => [],
+        'pdfs'   => [],
     ];
 
     if (is_array($value)) {
@@ -834,6 +770,14 @@ function nf_xlsx_prepare_value_payload($value) {
 
             if ($fileUrl && nf_xlsx_is_linkable_url($fileUrl)) {
                 $payload['links'][] = $fileUrl;
+
+                if (nf_xlsx_is_image_url($fileUrl)) {
+                    $payload['images'][] = $fileUrl;
+                }
+
+                if (nf_xlsx_is_pdf_url($fileUrl)) {
+                    $payload['pdfs'][] = $fileUrl;
+                }
             }
         } else {
             if (array_key_exists('value', $value)) {
@@ -848,12 +792,22 @@ function nf_xlsx_prepare_value_payload($value) {
                         $valuePayload['links'] = array_values(array_unique($valuePayload['links']));
                     }
 
+                    if (!empty($valuePayload['images'])) {
+                        $valuePayload['images'] = array_values(array_unique($valuePayload['images']));
+                    }
+
+                    if (!empty($valuePayload['pdfs'])) {
+                        $valuePayload['pdfs'] = array_values(array_unique($valuePayload['pdfs']));
+                    }
+
                     return $valuePayload;
                 }
             }
 
             $texts = [];
             $links = [];
+            $images = [];
+            $pdfs   = [];
 
             foreach ($value as $key => $item) {
                 if ($key === 'value') {
@@ -869,6 +823,14 @@ function nf_xlsx_prepare_value_payload($value) {
                 if (!empty($itemPayload['links'])) {
                     $links = array_merge($links, $itemPayload['links']);
                 }
+
+                if (!empty($itemPayload['images'])) {
+                    $images = array_merge($images, $itemPayload['images']);
+                }
+
+                if (!empty($itemPayload['pdfs'])) {
+                    $pdfs = array_merge($pdfs, $itemPayload['pdfs']);
+                }
             }
 
             if ($texts) {
@@ -878,6 +840,14 @@ function nf_xlsx_prepare_value_payload($value) {
             if ($links) {
                 $payload['links'] = array_values(array_unique($links));
             }
+
+            if ($images) {
+                $payload['images'] = array_values(array_unique($images));
+            }
+
+            if ($pdfs) {
+                $payload['pdfs'] = array_values(array_unique($pdfs));
+            }
         }
     } elseif (is_scalar($value)) {
         $string = trim((string) $value);
@@ -886,12 +856,28 @@ function nf_xlsx_prepare_value_payload($value) {
 
             if (nf_xlsx_is_linkable_url($string)) {
                 $payload['links'][] = $string;
+
+                if (nf_xlsx_is_image_url($string)) {
+                    $payload['images'][] = $string;
+                }
+
+                if (nf_xlsx_is_pdf_url($string)) {
+                    $payload['pdfs'][] = $string;
+                }
             }
         }
     }
 
     if (!empty($payload['links'])) {
         $payload['links'] = array_values(array_unique(array_map('trim', $payload['links'])));
+    }
+
+    if (!empty($payload['images'])) {
+        $payload['images'] = array_values(array_unique(array_map('trim', $payload['images'])));
+    }
+
+    if (!empty($payload['pdfs'])) {
+        $payload['pdfs'] = array_values(array_unique(array_map('trim', $payload['pdfs'])));
     }
 
     return $payload;
@@ -1114,23 +1100,55 @@ function nf_xlsx_locate_file_path($value) {
 }
 
 function nf_xlsx_is_linkable_url($url) {
-    if (!is_string($url) || $url === '') {
+    $extension = nf_xlsx_url_extension($url);
+
+    if ($extension === '') {
         return false;
+    }
+
+    return nf_xlsx_is_image_extension($extension) || nf_xlsx_is_pdf_extension($extension);
+}
+
+function nf_xlsx_is_image_url($url) {
+    $extension = nf_xlsx_url_extension($url);
+
+    return nf_xlsx_is_image_extension($extension);
+}
+
+function nf_xlsx_is_pdf_url($url) {
+    return nf_xlsx_url_extension($url) === 'pdf';
+}
+
+function nf_xlsx_is_image_extension($extension) {
+    if (!is_string($extension) || $extension === '') {
+        return false;
+    }
+
+    $extension = strtolower($extension);
+
+    return in_array($extension, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true);
+}
+
+function nf_xlsx_is_pdf_extension($extension) {
+    return is_string($extension) && strtolower($extension) === 'pdf';
+}
+
+function nf_xlsx_url_extension($url) {
+    if (!is_string($url) || $url === '') {
+        return '';
     }
 
     $url = trim($url);
     if ($url === '') {
-        return false;
+        return '';
     }
 
     $path = parse_url($url, PHP_URL_PATH);
     if (!$path) {
-        return false;
+        return '';
     }
 
-    $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-
-    return in_array($extension, ['jpg', 'jpeg', 'png', 'pdf'], true);
+    return strtolower(pathinfo($path, PATHINFO_EXTENSION));
 }
 
 function nf_xlsx_format_date($date) {
@@ -1153,11 +1171,15 @@ function nf_col_from_index($index) {
         $index = 1;
     }
 
-    try {
-        return Coordinate::stringFromColumnIndex($index);
-    } catch (Throwable $exception) {
-        return 'A';
+    $letters = '';
+
+    while ($index > 0) {
+        $index--;
+        $letters = chr($index % 26 + 65) . $letters;
+        $index   = (int) floor($index / 26);
     }
+
+    return $letters !== '' ? $letters : 'A';
 }
 
 function nf_addr($column, $row) {
@@ -1177,19 +1199,6 @@ function nf_addr($column, $row) {
     }
 
     return $column . $row;
-}
-
-function nf_safe_set($sheet, $colIndex, $row, $value) {
-    if ($colIndex < 1) {
-        $colIndex = 1;
-    }
-
-    $column = Coordinate::stringFromColumnIndex((int) $colIndex);
-    $coordinate = $column . max(1, (int) $row);
-
-    $sheet->setCellValue($coordinate, $value ?? '');
-
-    return $coordinate;
 }
 
 function nf_xlsx_field_identifier($fieldId) {
