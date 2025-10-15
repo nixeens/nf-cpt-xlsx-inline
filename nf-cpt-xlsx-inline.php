@@ -11,6 +11,9 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+define('NF_CPT_XLSX_INLINE_SLUG', 'nf-cpt-xlsx-inline');
+define('NF_CPT_XLSX_INLINE_TEXT_DOMAIN', 'nf-cpt-xlsx-inline');
+
 /* ------------------------------------------------------------
  * 1️⃣ AUTOLOAD LOCAL LIBRARIES
  * ------------------------------------------------------------ */
@@ -89,16 +92,16 @@ add_action('admin_menu', function () {
 
     add_submenu_page(
         'ninja-forms',
-        __('Export to XLSX', 'nf-cpt-xlsx-inline'),
-        __('Export to XLSX', 'nf-cpt-xlsx-inline'),
+        __('Export to XLSX', NF_CPT_XLSX_INLINE_TEXT_DOMAIN),
+        __('Export to XLSX', NF_CPT_XLSX_INLINE_TEXT_DOMAIN),
         $capability,
-        'nf-cpt-xlsx-inline',
+        NF_CPT_XLSX_INLINE_SLUG,
         'nf_cpt_xlsx_inline_admin_page'
     );
 });
 
 add_action('admin_notices', function () {
-    if (!isset($_GET['page']) || $_GET['page'] !== 'nf-cpt-xlsx-inline') {
+    if (!isset($_GET['page']) || $_GET['page'] !== NF_CPT_XLSX_INLINE_SLUG) {
         return;
     }
 
@@ -111,14 +114,14 @@ add_action('admin_notices', function () {
 
             printf(
                 '<div class="notice notice-success"><p>%s <a href="%s">%s</a></p></div>',
-                esc_html__('Excel export completed successfully.', 'nf-cpt-xlsx-inline'),
+                esc_html__('Excel export completed successfully.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN),
                 esc_url($url),
-                esc_html__('Download file', 'nf-cpt-xlsx-inline')
+                esc_html__('Download file', NF_CPT_XLSX_INLINE_TEXT_DOMAIN)
             );
         } else {
             printf(
                 '<div class="notice notice-success"><p>%s</p></div>',
-                esc_html__('Excel export completed successfully.', 'nf-cpt-xlsx-inline')
+                esc_html__('Excel export completed successfully.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN)
             );
         }
     }
@@ -126,7 +129,7 @@ add_action('admin_notices', function () {
     if (!empty($_GET['nf_xlsx_notice']) && $_GET['nf_xlsx_notice'] === 'error') {
         $messageParam = isset($_GET['nf_xlsx_message']) ? wp_unslash($_GET['nf_xlsx_message']) : '';
         $decodedMessage = $messageParam ? rawurldecode($messageParam) : '';
-        $message = $decodedMessage ? wp_strip_all_tags($decodedMessage) : __('Unknown error.', 'nf-cpt-xlsx-inline');
+        $message = $decodedMessage ? wp_strip_all_tags($decodedMessage) : __('Unknown error.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN);
         printf(
             '<div class="notice notice-error"><p>%s</p></div>',
             esc_html($message)
@@ -139,7 +142,7 @@ add_action('admin_notices', function () {
  * ------------------------------------------------------------ */
 function nf_cpt_xlsx_inline_admin_page() {
     if (!current_user_can(nf_cpt_xlsx_inline_required_capability())) {
-        wp_die(__('You are not allowed to access this page.', 'nf-cpt-xlsx-inline'));
+        wp_die(__('You are not allowed to access this page.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN));
     }
 
     $forms = nf_cpt_xlsx_inline_get_forms();
@@ -147,11 +150,11 @@ function nf_cpt_xlsx_inline_admin_page() {
 
     ?>
     <div class="wrap">
-        <h1><?php esc_html_e('Ninja Forms → Export to XLSX', 'nf-cpt-xlsx-inline'); ?></h1>
-        <p><?php esc_html_e('Generate an Excel workbook of Ninja Forms submissions. Uploaded images are embedded directly in the sheet.', 'nf-cpt-xlsx-inline'); ?></p>
+        <h1><?php esc_html_e('Ninja Forms → Export to XLSX', NF_CPT_XLSX_INLINE_TEXT_DOMAIN); ?></h1>
+        <p><?php esc_html_e('Generate an Excel workbook of Ninja Forms submissions. Uploaded images are embedded directly in the sheet.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN); ?></p>
 
         <?php if (empty($forms)) : ?>
-            <div class="notice notice-warning"><p><?php esc_html_e('No Ninja Forms found. Create a form to enable exports.', 'nf-cpt-xlsx-inline'); ?></p></div>
+            <div class="notice notice-warning"><p><?php esc_html_e('No Ninja Forms found. Create a form to enable exports.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN); ?></p></div>
         <?php else : ?>
             <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                 <?php wp_nonce_field('nf_cpt_xlsx_inline_export', '_nf_cpt_nonce'); ?>
@@ -159,19 +162,19 @@ function nf_cpt_xlsx_inline_admin_page() {
                 <table class="form-table" role="presentation">
                     <tbody>
                         <tr>
-                            <th scope="row"><label for="nf-cpt-xlsx-form-id"><?php esc_html_e('Select form', 'nf-cpt-xlsx-inline'); ?></label></th>
+                            <th scope="row"><label for="nf-cpt-xlsx-form-id"><?php esc_html_e('Select form', NF_CPT_XLSX_INLINE_TEXT_DOMAIN); ?></label></th>
                             <td>
                                 <select id="nf-cpt-xlsx-form-id" name="form_id">
                                     <?php foreach ($forms as $form_id => $form_title) : ?>
                                         <option value="<?php echo esc_attr($form_id); ?>" <?php selected($current_form, $form_id); ?>><?php echo esc_html($form_title); ?></option>
                                     <?php endforeach; ?>
                                 </select>
-                                <p class="description"><?php esc_html_e('Exports include all submission fields and uploaded images.', 'nf-cpt-xlsx-inline'); ?></p>
+                                <p class="description"><?php esc_html_e('Exports include all submission fields and uploaded images.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN); ?></p>
                             </td>
                         </tr>
                     </tbody>
                 </table>
-                <?php submit_button(__('Export submissions', 'nf-cpt-xlsx-inline')); ?>
+                <?php submit_button(__('Export submissions', NF_CPT_XLSX_INLINE_TEXT_DOMAIN)); ?>
             </form>
         <?php endif; ?>
     </div>
@@ -185,7 +188,7 @@ add_action('admin_post_nf_cpt_export_to_xlsx', 'nf_cpt_xlsx_inline_export');
 
 function nf_cpt_xlsx_inline_export() {
     if (!current_user_can(nf_cpt_xlsx_inline_required_capability())) {
-        wp_die(__('You are not allowed to export data.', 'nf-cpt-xlsx-inline'));
+        wp_die(__('You are not allowed to export data.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN));
     }
 
     check_admin_referer('nf_cpt_xlsx_inline_export', '_nf_cpt_nonce');
@@ -193,44 +196,21 @@ function nf_cpt_xlsx_inline_export() {
     $form_id = isset($_POST['form_id']) ? absint($_POST['form_id']) : 0;
 
     if (!$form_id) {
-        nf_cpt_xlsx_inline_redirect_error(__('Invalid form selection.', 'nf-cpt-xlsx-inline'));
+        nf_cpt_xlsx_inline_redirect_error(__('Invalid form selection.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN));
     }
 
     try {
         $form = nf_cpt_xlsx_inline_get_form($form_id);
         if (!$form) {
-            nf_cpt_xlsx_inline_redirect_error(__('Selected form does not exist.', 'nf-cpt-xlsx-inline'));
+            nf_cpt_xlsx_inline_redirect_error(__('Selected form does not exist.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN));
         }
 
         $spreadsheet = nf_cpt_xlsx_inline_build_spreadsheet($form_id, $form['title']);
 
-        $filename = sprintf('nf-export-%d-%s.xlsx', $form_id, gmdate('Y-m-d-H-i'));
-        $uploads  = wp_upload_dir();
+        $filename = nf_cpt_xlsx_inline_generate_filename($form_id);
+        $saved    = nf_cpt_xlsx_inline_save_spreadsheet($spreadsheet, $filename);
 
-        if (!empty($uploads['error'])) {
-            throw new RuntimeException($uploads['error']);
-        }
-
-        if (!wp_mkdir_p($uploads['path'])) {
-            throw new RuntimeException(__('Unable to create upload directory.', 'nf-cpt-xlsx-inline'));
-        }
-
-        $filepath = trailingslashit($uploads['path']) . $filename;
-
-        $writer = IOFactory::createWriter($spreadsheet, 'Xlsx');
-        $writer->setPreCalculateFormulas(false);
-        $writer->save($filepath);
-        $spreadsheet->disconnectWorksheets();
-
-        $redirect_url = add_query_arg(
-            [
-                'page'             => 'nf-cpt-xlsx-inline',
-                'form_id'          => $form_id,
-                'nf_xlsx_notice'   => 'success',
-                'nf_xlsx_file'     => rawurlencode($filename),
-            ],
-            admin_url('admin.php')
-        );
+        $redirect_url = nf_cpt_xlsx_inline_build_success_redirect($form_id, $saved['filename']);
 
         wp_safe_redirect($redirect_url);
         exit;
@@ -243,7 +223,7 @@ function nf_cpt_xlsx_inline_export() {
 function nf_cpt_xlsx_inline_redirect_error($message) {
     $redirect_url = add_query_arg(
         [
-            'page'             => 'nf-cpt-xlsx-inline',
+            'page'             => NF_CPT_XLSX_INLINE_SLUG,
             'nf_xlsx_notice'   => 'error',
             'nf_xlsx_message'  => rawurlencode($message),
         ],
@@ -252,6 +232,47 @@ function nf_cpt_xlsx_inline_redirect_error($message) {
 
     wp_safe_redirect($redirect_url);
     exit;
+}
+
+function nf_cpt_xlsx_inline_generate_filename($form_id) {
+    return sprintf('nf-export-%d-%s.xlsx', (int) $form_id, gmdate('Y-m-d-H-i'));
+}
+
+function nf_cpt_xlsx_inline_save_spreadsheet(Spreadsheet $spreadsheet, $filename) {
+    $uploads = wp_upload_dir();
+
+    if (!empty($uploads['error'])) {
+        throw new RuntimeException($uploads['error']);
+    }
+
+    if (!wp_mkdir_p($uploads['path'])) {
+        throw new RuntimeException(__('Unable to create upload directory.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN));
+    }
+
+    $filepath = trailingslashit($uploads['path']) . $filename;
+
+    $writer = IOFactory::createWriter($spreadsheet, 'Xlsx');
+    $writer->setPreCalculateFormulas(false);
+    $writer->save($filepath);
+    $spreadsheet->disconnectWorksheets();
+
+    return [
+        'path'     => $filepath,
+        'filename' => basename($filename),
+        'url'      => trailingslashit($uploads['url']) . basename($filename),
+    ];
+}
+
+function nf_cpt_xlsx_inline_build_success_redirect($form_id, $filename) {
+    return add_query_arg(
+        [
+            'page'           => NF_CPT_XLSX_INLINE_SLUG,
+            'form_id'        => (int) $form_id,
+            'nf_xlsx_notice' => 'success',
+            'nf_xlsx_file'   => rawurlencode($filename),
+        ],
+        admin_url('admin.php')
+    );
 }
 
 /* ------------------------------------------------------------
@@ -337,15 +358,15 @@ function nf_cpt_xlsx_inline_build_spreadsheet($form_id, $form_title) {
     $spreadsheet = new Spreadsheet();
     $spreadsheet->getProperties()
         ->setCreator(get_bloginfo('name'))
-        ->setTitle(sprintf(__('Ninja Forms Export – %s', 'nf-cpt-xlsx-inline'), $form_title))
-        ->setDescription(__('Generated with NF CPT → XLSX Inline Export.', 'nf-cpt-xlsx-inline'));
+        ->setTitle(sprintf(__('Ninja Forms Export – %s', NF_CPT_XLSX_INLINE_TEXT_DOMAIN), $form_title))
+        ->setDescription(__('Generated with NF CPT → XLSX Inline Export.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN));
 
     $sheet = $spreadsheet->getActiveSheet();
-    $sheet->setTitle(__('Submissions', 'nf-cpt-xlsx-inline'));
+    $sheet->setTitle(__('Submissions', NF_CPT_XLSX_INLINE_TEXT_DOMAIN));
 
     $headers = [
-        'submission_id' => __('Submission ID', 'nf-cpt-xlsx-inline'),
-        'submitted_at'  => __('Submitted At', 'nf-cpt-xlsx-inline'),
+        'submission_id' => __('Submission ID', NF_CPT_XLSX_INLINE_TEXT_DOMAIN),
+        'submitted_at'  => __('Submitted At', NF_CPT_XLSX_INLINE_TEXT_DOMAIN),
     ];
 
     foreach ($fields as $field) {
@@ -363,7 +384,7 @@ function nf_cpt_xlsx_inline_build_spreadsheet($form_id, $form_title) {
     }
 
     if (empty($submissions)) {
-        $sheet->setCellValue('A2', __('No submissions available for this form.', 'nf-cpt-xlsx-inline'));
+        $sheet->setCellValue('A2', __('No submissions available for this form.', NF_CPT_XLSX_INLINE_TEXT_DOMAIN));
         $sheet->mergeCells('A2:' . Coordinate::stringFromColumnIndex(count($headers)) . '2');
         $sheet->getStyle('A2')->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
         $sheet->getRowDimension(2)->setRowHeight(24);
