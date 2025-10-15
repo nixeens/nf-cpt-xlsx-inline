@@ -439,33 +439,27 @@ function nf_xlsx_get_form_fields($form_id) {
 function nf_xlsx_get_submissions($form_id, $limit = 0) {
     global $wpdb;
 
-    $subs_table = $wpdb->prefix . 'nf3_subs';
-    $meta_table = $wpdb->prefix . 'nf3_sub_meta';
+    $form_id     = (int) $form_id;
+    $limit       = (int) $limit;
+    $posts_table = $wpdb->posts;
+    $meta_table  = $wpdb->postmeta;
+
+    $order = $limit > 0 ? 'DESC' : 'ASC';
+
+    $sql = $wpdb->prepare(
+        "SELECT p.ID AS sub_id, p.post_date AS sub_date, p.post_status
+         FROM {$posts_table} p
+         INNER JOIN {$meta_table} fm
+             ON fm.post_id = p.ID
+             AND fm.meta_key = '_form_id'
+             AND fm.meta_value = %d
+         WHERE p.post_type = 'nf_sub'
+         ORDER BY p.ID {$order}",
+        $form_id
+    );
 
     if ($limit > 0) {
-        $subSelect = $wpdb->prepare(
-            "SELECT id, sub_date
-             FROM {$subs_table}
-             WHERE form_id = %d
-             ORDER BY sub_date ASC
-             LIMIT %d",
-            $form_id,
-            $limit
-        );
-
-        $sql = "SELECT s.id AS sub_id, s.sub_date, m.meta_key, m.meta_value
-                FROM ({$subSelect}) AS s
-                LEFT JOIN {$meta_table} AS m ON m.sub_id = s.id
-                ORDER BY s.sub_date ASC, m.meta_key ASC";
-    } else {
-        $sql = $wpdb->prepare(
-            "SELECT s.id AS sub_id, s.sub_date, m.meta_key, m.meta_value
-             FROM {$subs_table} AS s
-             LEFT JOIN {$meta_table} AS m ON m.sub_id = s.id
-             WHERE s.form_id = %d
-             ORDER BY s.sub_date ASC, m.meta_key ASC",
-            $form_id
-        );
+        $sql .= $wpdb->prepare(' LIMIT %d', $limit);
     }
 
     $rows = $wpdb->get_results($sql, ARRAY_A);
@@ -475,6 +469,7 @@ function nf_xlsx_get_submissions($form_id, $limit = 0) {
     }
 
     $submissions = [];
+    $submissionIds = [];
 
     foreach ($rows as $row) {
         $id = (int) $row['sub_id'];
@@ -483,21 +478,41 @@ function nf_xlsx_get_submissions($form_id, $limit = 0) {
             $submissions[$id] = [
                 'id'       => $id,
                 'sub_date' => $row['sub_date'],
+                'status'   => isset($row['post_status']) ? (string) $row['post_status'] : '',
                 'meta'     => [],
             ];
+            $submissionIds[] = $id;
         }
+    }
 
-        if ($row['meta_key'] === null) {
-            continue;
+    if ($submissionIds) {
+        $placeholders = implode(',', array_fill(0, count($submissionIds), '%d'));
+        $metaSql      = $wpdb->prepare(
+            "SELECT post_id, meta_key, meta_value
+             FROM {$meta_table}
+             WHERE post_id IN ({$placeholders})",
+            $submissionIds
+        );
+
+        $metaRows = $wpdb->get_results($metaSql, ARRAY_A);
+
+        if ($metaRows) {
+            foreach ($metaRows as $metaRow) {
+                $postId = (int) $metaRow['post_id'];
+
+                if (!isset($submissions[$postId])) {
+                    continue;
+                }
+
+                $metaKey = isset($metaRow['meta_key']) ? (string) $metaRow['meta_key'] : '';
+
+                if (!isset($submissions[$postId]['meta'][$metaKey])) {
+                    $submissions[$postId]['meta'][$metaKey] = [];
+                }
+
+                $submissions[$postId]['meta'][$metaKey][] = $metaRow['meta_value'];
+            }
         }
-
-        $metaKey = (string) $row['meta_key'];
-
-        if (!isset($submissions[$id]['meta'][$metaKey])) {
-            $submissions[$id]['meta'][$metaKey] = [];
-        }
-
-        $submissions[$id]['meta'][$metaKey][] = $row['meta_value'];
     }
 
     return array_values($submissions);
