@@ -1,5 +1,6 @@
 <?php
 
+use PhpOffice\PhpSpreadsheet\Cell\Cell;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -78,7 +79,7 @@ class NF_XLSX_Stream_Exporter {
             $columnIndex = (int) $column['index'];
             $headerText  = (string) $column['header'];
 
-            $cell = $this->submissionsSheet->getCellByColumnAndRow($columnIndex, 1);
+            $cell = $this->cell($this->submissionsSheet, $columnIndex, 1);
             $cell->setValueExplicit($headerText, DataType::TYPE_STRING);
 
             $style = $this->submissionsSheet->getStyleByColumnAndRow($columnIndex, 1);
@@ -93,7 +94,7 @@ class NF_XLSX_Stream_Exporter {
 
     private function addNoSubmissionsRow(): void {
         $message = __('No submissions available for this form.', 'nf-cpt-xlsx-inline');
-        $cell    = $this->submissionsSheet->getCellByColumnAndRow(1, 2);
+        $cell    = $this->cell($this->submissionsSheet, 1, 2);
         $cell->setValueExplicit($message, DataType::TYPE_STRING);
         $this->submissionsSheet->getStyle('A2')->getAlignment()->setWrapText(true);
         $this->ensureRowHeight(2, 22.0);
@@ -120,8 +121,7 @@ class NF_XLSX_Stream_Exporter {
                 }
 
                 if (!empty($payload['links'])) {
-                    $this->submissionsSheet
-                        ->getCellByColumnAndRow($columnIndex, $rowIndex)
+                    $this->cell($this->submissionsSheet, $columnIndex, $rowIndex)
                         ->getHyperlink()
                         ->setUrl($payload['links'][0])
                         ->setTooltip(__('Open link', 'nf-cpt-xlsx-inline'));
@@ -146,7 +146,7 @@ class NF_XLSX_Stream_Exporter {
         }
     }
     private function writeCellText(int $columnIndex, int $rowIndex, string $value): void {
-        $cell = $this->submissionsSheet->getCellByColumnAndRow($columnIndex, $rowIndex);
+        $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
         $cell->setValueExplicit($value, DataType::TYPE_STRING);
 
         $style = $this->submissionsSheet->getStyleByColumnAndRow($columnIndex, $rowIndex);
@@ -246,7 +246,7 @@ class NF_XLSX_Stream_Exporter {
         $drawing->setOffsetX(2);
         $drawing->setOffsetY($offsetY);
 
-        $cell = $this->submissionsSheet->getCellByColumnAndRow($columnIndex, $rowIndex);
+        $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
         $cell->getHyperlink()->setUrl($url);
         $cell->getHyperlink()->setTooltip(__('Open PDF', 'nf-cpt-xlsx-inline'));
 
@@ -257,7 +257,7 @@ class NF_XLSX_Stream_Exporter {
             return;
         }
 
-        $cell = $this->submissionsSheet->getCellByColumnAndRow($columnIndex, $rowIndex);
+        $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
         $existing = (string) $cell->getValue();
 
         if ($existing !== '') {
@@ -311,7 +311,7 @@ class NF_XLSX_Stream_Exporter {
         $sheet->setCellValueExplicitByColumnAndRow(3, $this->attachmentsRow, (string) $url, DataType::TYPE_STRING);
 
         if ($url !== '') {
-            $sheet->getCellByColumnAndRow(3, $this->attachmentsRow)
+            $this->cell($sheet, 3, $this->attachmentsRow)
                 ->getHyperlink()
                 ->setUrl($url)
                 ->setTooltip(__('Open original file', 'nf-cpt-xlsx-inline'));
@@ -435,6 +435,10 @@ class NF_XLSX_Stream_Exporter {
 
     private function coordinate(int $columnIndex, int $rowIndex): string {
         return Coordinate::stringFromColumnIndex($columnIndex) . (string) $rowIndex;
+    }
+
+    private function cell(Worksheet $sheet, int $columnIndex, int $rowIndex): Cell {
+        return $sheet->getCell($this->coordinate($columnIndex, $rowIndex));
     }
     private static function image_entries_from_value(array $payload): array {
         $urls = [];
