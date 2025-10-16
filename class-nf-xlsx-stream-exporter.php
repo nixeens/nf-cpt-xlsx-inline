@@ -3,6 +3,7 @@
 use PhpOffice\PhpSpreadsheet\Cell\Cell;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
+use PhpOffice\PhpSpreadsheet\IOFactory;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Style\Style;
@@ -52,14 +53,19 @@ class NF_XLSX_Stream_Exporter {
 
     public function save(string $filepath): void {
         $this->spreadsheet->setActiveSheetIndex(0);
-        $writer = new Xlsx($this->spreadsheet);
-        $writer->setPreCalculateFormulas(false);
+        $writer = IOFactory::createWriter($this->spreadsheet, 'Xlsx');
+
+        if ($writer instanceof Xlsx) {
+            $writer->setPreCalculateFormulas(false);
+        }
+
         $writer->save($filepath);
         $this->spreadsheet->disconnectWorksheets();
         $this->cleanupTempFiles();
     }
     private function initialiseSheets(): void {
         $this->spreadsheet = new Spreadsheet();
+        $this->configureTheme();
         $this->spreadsheet->getDefaultStyle()->getFont()->setName('Calibri')->setSize(11);
 
         $this->submissionsSheet = $this->spreadsheet->getActiveSheet();
@@ -281,10 +287,10 @@ class NF_XLSX_Stream_Exporter {
 
         $this->attachmentsSheet = new Worksheet($this->spreadsheet, $this->attachmentsSheetName);
         $this->spreadsheet->addSheet($this->attachmentsSheet);
-        $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(1, 1, __('Row', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
-        $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(2, 1, __('Column', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
-        $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(3, 1, __('Original URL', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
-        $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(4, 1, __('Status', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
+        $this->setCellValueExplicit($this->attachmentsSheet, 1, 1, __('Row', 'nf-cpt-xlsx-inline'));
+        $this->setCellValueExplicit($this->attachmentsSheet, 2, 1, __('Column', 'nf-cpt-xlsx-inline'));
+        $this->setCellValueExplicit($this->attachmentsSheet, 3, 1, __('Original URL', 'nf-cpt-xlsx-inline'));
+        $this->setCellValueExplicit($this->attachmentsSheet, 4, 1, __('Status', 'nf-cpt-xlsx-inline'));
 
         for ($col = 1; $col <= 4; $col++) {
             $style = $this->style($this->attachmentsSheet, $col, 1);
@@ -307,9 +313,9 @@ class NF_XLSX_Stream_Exporter {
         $sheet = $this->ensureAttachmentsSheet();
         ++$this->attachmentsRow;
 
-        $sheet->setCellValueExplicitByColumnAndRow(1, $this->attachmentsRow, (string) $sourceRow, DataType::TYPE_STRING);
-        $sheet->setCellValueExplicitByColumnAndRow(2, $this->attachmentsRow, (string) $columnLabel, DataType::TYPE_STRING);
-        $sheet->setCellValueExplicitByColumnAndRow(3, $this->attachmentsRow, (string) $url, DataType::TYPE_STRING);
+        $this->setCellValueExplicit($sheet, 1, $this->attachmentsRow, (string) $sourceRow);
+        $this->setCellValueExplicit($sheet, 2, $this->attachmentsRow, (string) $columnLabel);
+        $this->setCellValueExplicit($sheet, 3, $this->attachmentsRow, (string) $url);
 
         if ($url !== '') {
             $this->cell($sheet, 3, $this->attachmentsRow)
@@ -322,7 +328,7 @@ class NF_XLSX_Stream_Exporter {
             ? __('Icon linked', 'nf-cpt-xlsx-inline')
             : __('Download failed', 'nf-cpt-xlsx-inline');
 
-        $sheet->setCellValueExplicitByColumnAndRow(4, $this->attachmentsRow, $status, DataType::TYPE_STRING);
+        $this->setCellValueExplicit($sheet, 4, $this->attachmentsRow, $status);
 
         for ($col = 1; $col <= 4; $col++) {
             $style = $this->style($sheet, $col, $this->attachmentsRow);
@@ -445,6 +451,43 @@ class NF_XLSX_Stream_Exporter {
 
     private function style(Worksheet $sheet, int $columnIndex, int $rowIndex): Style {
         return $sheet->getStyle($this->coordinate($columnIndex, $rowIndex));
+    }
+
+    private function setCellValueExplicit(Worksheet $sheet, int $columnIndex, int $rowIndex, string $value): void {
+        $sheet->setCellValueExplicit(
+            $this->coordinate($columnIndex, $rowIndex),
+            $value,
+            DataType::TYPE_STRING
+        );
+    }
+
+    private function configureTheme(): void {
+        $theme = $this->spreadsheet->getTheme();
+        $theme->setThemeColorName('Office');
+        $theme->setThemeFontName('Office');
+        $theme->setMajorFontValues('Cambria', '', 'Times New Roman', []);
+        $theme->setMinorFontValues('Calibri', '', 'Times New Roman', []);
+
+        $defaultColours = [
+            'lt1'      => 'FFFFFF',
+            'dk1'      => '000000',
+            'lt2'      => 'EEECE1',
+            'dk2'      => '1F497D',
+            'accent1'  => '4F81BD',
+            'accent2'  => 'C0504D',
+            'accent3'  => '9BBB59',
+            'accent4'  => '8064A2',
+            'accent5'  => '4BACC6',
+            'accent6'  => 'F79646',
+            'hlink'    => '0000FF',
+            'folHlink' => '800080',
+        ];
+
+        foreach ($defaultColours as $colourName => $colourValue) {
+            $theme->setThemeColor($colourName, $colourValue);
+        }
+
+        $this->spreadsheet->resetThemeFonts();
     }
     private static function image_entries_from_value(array $payload): array {
         $urls = [];

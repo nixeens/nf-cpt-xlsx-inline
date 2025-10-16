@@ -923,6 +923,29 @@ function nf_xlsx_prepare_value_payload($value) {
     ];
 
     if (is_array($value)) {
+        $fileTexts = [];
+        if (!empty($value['files']) && is_array($value['files'])) {
+            foreach ($value['files'] as $fileEntry) {
+                $entryPayload = nf_xlsx_prepare_value_payload($fileEntry);
+
+                if ($entryPayload['text'] !== '') {
+                    $fileTexts[] = $entryPayload['text'];
+                }
+
+                if (!empty($entryPayload['links'])) {
+                    $payload['links'] = array_merge($payload['links'], $entryPayload['links']);
+                }
+
+                if (!empty($entryPayload['images'])) {
+                    $payload['images'] = array_merge($payload['images'], $entryPayload['images']);
+                }
+
+                if (!empty($entryPayload['pdfs'])) {
+                    $payload['pdfs'] = array_merge($payload['pdfs'], $entryPayload['pdfs']);
+                }
+            }
+        }
+
         if (nf_xlsx_is_upload_payload($value)) {
             $fileUrl         = nf_xlsx_resolve_file_url($value);
             $payload['text'] = nf_xlsx_guess_file_label($value, $fileUrl);
@@ -1012,6 +1035,11 @@ function nf_xlsx_prepare_value_payload($value) {
                 $payload['pdfs'] = array_values(array_unique($pdfs));
             }
         }
+
+        if ($fileTexts) {
+            $existingText = $payload['text'] !== '' ? [$payload['text']] : [];
+            $payload['text'] = implode("\n", array_values(array_unique(array_merge($fileTexts, $existingText))));
+        }
     } elseif (is_scalar($value)) {
         $string = trim((string) $value);
         if ($string !== '') {
@@ -1053,6 +1081,10 @@ function nf_xlsx_is_upload_payload(array $value) {
         if (array_key_exists($key, $value)) {
             return true;
         }
+    }
+
+    if (!empty($value['files']) && is_array($value['files'])) {
+        return true;
     }
 
     if (isset($value['value'])) {
@@ -1116,6 +1148,19 @@ function nf_xlsx_resolve_file_url(array $value) {
         }
     }
 
+    if (!empty($value['files']) && is_array($value['files'])) {
+        foreach ($value['files'] as $fileEntry) {
+            if (is_array($fileEntry)) {
+                $nested = nf_xlsx_resolve_file_url($fileEntry);
+                if ($nested) {
+                    $candidates[] = $nested;
+                }
+            } elseif (is_string($fileEntry)) {
+                $candidates[] = $fileEntry;
+            }
+        }
+    }
+
     foreach ($candidates as $candidate) {
         $candidate = trim((string) $candidate);
 
@@ -1165,6 +1210,16 @@ function nf_xlsx_convert_path_to_url($path) {
 
     if (strpos($path, '/') === 0) {
         $maybe = $baseDir . ltrim($path, '/');
+        if (file_exists($maybe)) {
+            $normalized = wp_normalize_path($maybe);
+            $relative   = ltrim(substr($normalized, strlen($baseDir)), '/');
+            return $baseUrl . str_replace('\\', '/', $relative);
+        }
+    }
+
+    $relative = ltrim($path, '/');
+    if (strpos($relative, 'ninja-forms/') === 0) {
+        $maybe = $baseDir . $relative;
         if (file_exists($maybe)) {
             $normalized = wp_normalize_path($maybe);
             $relative   = ltrim(substr($normalized, strlen($baseDir)), '/');
@@ -1226,6 +1281,16 @@ function nf_xlsx_locate_file_path($value) {
         if (isset($value[0]) && is_array($value[0])) {
             $candidates[] = nf_xlsx_locate_file_path($value[0]);
         }
+
+        if (!empty($value['files']) && is_array($value['files'])) {
+            foreach ($value['files'] as $fileEntry) {
+                if (is_array($fileEntry)) {
+                    $candidates[] = nf_xlsx_locate_file_path($fileEntry);
+                } elseif (is_string($fileEntry)) {
+                    $candidates[] = $fileEntry;
+                }
+            }
+        }
     }
 
     $uploads = wp_upload_dir();
@@ -1256,6 +1321,29 @@ function nf_xlsx_locate_file_path($value) {
         $maybe = $baseDir . ltrim($candidate, '/');
         if (file_exists($maybe)) {
             return realpath($maybe);
+        }
+
+        $normalized = wp_normalize_path($candidate);
+        if (strpos($normalized, 'ninja-forms/') === 0) {
+            $maybe = $baseDir . ltrim($normalized, '/');
+            if (file_exists($maybe)) {
+                return realpath($maybe);
+            }
+        }
+
+        if (strpos($normalized, 'uploads/') === 0 && strpos($normalized, 'ninja-forms/') !== false) {
+            $maybe = $baseDir . ltrim(substr($normalized, strlen('uploads/')), '/');
+            if (file_exists($maybe)) {
+                return realpath($maybe);
+            }
+        }
+
+        if (strpos($normalized, 'ninja-forms/') !== false) {
+            $tail = substr($normalized, strpos($normalized, 'ninja-forms/'));
+            $maybe = $baseDir . ltrim($tail, '/');
+            if (file_exists($maybe)) {
+                return realpath($maybe);
+            }
         }
     }
 
