@@ -21,6 +21,7 @@ class NF_XLSX_Stream_Exporter {
     private int $imageCounter = 0;
     private int $pdfCounter = 0;
     private int $attachmentsRowIndex = 1;
+    private bool $attachmentsSheetInitialized = false;
     private string $submissionsSheetName;
     private string $attachmentsSheetName;
 
@@ -37,8 +38,6 @@ class NF_XLSX_Stream_Exporter {
 
     private function initialise_sheets(): void {
         $this->add_submission_headers();
-        $this->add_attachments_header();
-
         if (empty($this->submissions)) {
             $this->add_no_submissions_row();
         } else {
@@ -157,6 +156,8 @@ class NF_XLSX_Stream_Exporter {
             return;
         }
 
+        $this->ensure_attachments_sheet();
+
         ++$this->pdfCounter;
 
         $fileName = 'file' . $this->pdfCounter . '.pdf';
@@ -179,6 +180,19 @@ class NF_XLSX_Stream_Exporter {
         $this->add_cell('attachments', $rowIndex, 2, $columnLabel);
         $this->add_cell('attachments', $rowIndex, 3, $url);
         $this->add_cell('attachments', $rowIndex, 4, $partName);
+    }
+
+    private function ensure_attachments_sheet(): void {
+        if ($this->attachmentsSheetInitialized) {
+            return;
+        }
+
+        $this->attachmentsSheetInitialized = true;
+        $this->attachmentsRowIndex         = 1;
+        $this->sheetRows['attachments']    = [];
+        $this->rowMeta['attachments']      = [];
+
+        $this->add_attachments_header();
     }
 
     private function add_cell(string $sheet, int $rowIndex, int $columnIndex, string $value): void {
@@ -247,7 +261,7 @@ class NF_XLSX_Stream_Exporter {
 
         $sharedStringsXml = $this->build_shared_strings_xml();
         $sheet1Xml        = $this->build_submissions_sheet_xml();
-        $sheet2Xml        = $this->build_attachments_sheet_xml();
+        $sheet2Xml        = $this->attachmentsSheetInitialized ? $this->build_attachments_sheet_xml() : '';
         $workbookXml      = $this->build_workbook_xml();
         $workbookRelsXml  = $this->build_workbook_rels_xml();
         $contentTypesXml  = $this->build_content_types_xml();
@@ -274,7 +288,10 @@ class NF_XLSX_Stream_Exporter {
         $zip->addFromString('xl/theme/theme1.xml', $themeXml);
         $zip->addFromString('xl/sharedStrings.xml', $sharedStringsXml);
         $zip->addFromString('xl/worksheets/sheet1.xml', $sheet1Xml);
-        $zip->addFromString('xl/worksheets/sheet2.xml', $sheet2Xml);
+
+        if ($this->attachmentsSheetInitialized) {
+            $zip->addFromString('xl/worksheets/sheet2.xml', $sheet2Xml);
+        }
 
         if ($this->images) {
             $zip->addFromString('xl/worksheets/_rels/sheet1.xml.rels', $this->build_sheet1_rels_xml());
@@ -447,28 +464,42 @@ class NF_XLSX_Stream_Exporter {
     }
 
     private function build_workbook_xml(): string {
-        $sheets = '<sheets>'
-            . '<sheet name="' . self::xml_escape($this->submissionsSheetName) . '" sheetId="1" r:id="rId1"/>'
-            . '<sheet name="' . self::xml_escape($this->attachmentsSheetName) . '" sheetId="2" r:id="rId2"/>'
-            . '</sheets>';
+        $sheetIndex = 1;
+        $sheetEntries = [];
+
+        $sheetEntries[] = '<sheet name="' . self::xml_escape($this->submissionsSheetName) . '" sheetId="' . $sheetIndex . '" r:id="rId' . $sheetIndex . '"/>';
+
+        if ($this->attachmentsSheetInitialized) {
+            $sheetIndex++;
+            $sheetEntries[] = '<sheet name="' . self::xml_escape($this->attachmentsSheetName) . '" sheetId="' . $sheetIndex . '" r:id="rId' . $sheetIndex . '"/>';
+        }
+
+        $sheets = '<sheets>' . implode('', $sheetEntries) . '</sheets>';
 
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            . '<fileVersion appName="xl"/>'
             . '<workbookPr date1904="false"/>'
-            . '<bookViews><workbookView xWindow="240" yWindow="105" windowWidth="14805" windowHeight="8010"/></bookViews>'
+            . '<bookViews><workbookView xWindow="0" yWindow="0" windowWidth="28800" windowHeight="14400"/></bookViews>'
             . $sheets
-            . '<calcPr calcId="171027"/></workbook>';
+            . '</workbook>';
     }
 
     private function build_workbook_rels_xml(): string {
+        $relations = [
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        ];
+
+        if ($this->attachmentsSheetInitialized) {
+            $relations[] = '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>';
+        }
+
+        $relations[] = '<Relationship Id="rIdSharedStrings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>';
+        $relations[] = '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
+        $relations[] = '<Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>';
+
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-            . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
-            . '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>'
-            . '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
-            . '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>'
+            . implode('', $relations)
             . '</Relationships>';
     }
 
@@ -485,13 +516,16 @@ class NF_XLSX_Stream_Exporter {
         $overrides = [
             '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
             '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
-            '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
             '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>',
             '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>',
             '<Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>',
             '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
             '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>',
         ];
+
+        if ($this->attachmentsSheetInitialized) {
+            $overrides[] = '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+        }
 
         if ($this->images) {
             $overrides[] = '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>';
@@ -522,12 +556,11 @@ class NF_XLSX_Stream_Exporter {
     private function build_styles_xml(): string {
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            . '<fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font></fonts>'
-            . '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
-            . '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+            . '<fonts count="1"><font><name val="Calibri"/><sz val="11"/></font></fonts>'
+            . '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
+            . '<borders count="1"><border/></borders>'
             . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
             . '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
-            . '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
             . '</styleSheet>';
     }
 
@@ -540,51 +573,8 @@ class NF_XLSX_Stream_Exporter {
             . '<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>'
             . '<a:dk2><a:srgbClr val="1F497D"/></a:dk2>'
             . '<a:lt2><a:srgbClr val="EEECE1"/></a:lt2>'
-            . '<a:accent1><a:srgbClr val="4F81BD"/></a:accent1>'
-            . '<a:accent2><a:srgbClr val="C0504D"/></a:accent2>'
-            . '<a:accent3><a:srgbClr val="9BBB59"/></a:accent3>'
-            . '<a:accent4><a:srgbClr val="8064A2"/></a:accent4>'
-            . '<a:accent5><a:srgbClr val="4BACC6"/></a:accent5>'
-            . '<a:accent6><a:srgbClr val="F79646"/></a:accent6>'
-            . '<a:hlink><a:srgbClr val="0000FF"/></a:hlink>'
-            . '<a:folHlink><a:srgbClr val="800080"/></a:folHlink>'
             . '</a:clrScheme>'
-            . '<a:fontScheme name="Office">'
-            . '<a:majorFont>'
-            . '<a:latin typeface="Calibri" panose="020F0502020204030204"/>'
-            . '<a:ea typeface=""/>'
-            . '<a:cs typeface=""/>'
-            . '</a:majorFont>'
-            . '<a:minorFont>'
-            . '<a:latin typeface="Calibri" panose="020F0502020204030204"/>'
-            . '<a:ea typeface=""/>'
-            . '<a:cs typeface=""/>'
-            . '</a:minorFont>'
-            . '</a:fontScheme>'
-            . '<a:fmtScheme name="Office">'
-            . '<a:fillStyleLst>'
-            . '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
-            . '<a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="50000"/><a:satMod val="300000"/></a:schemeClr></a:gs><a:gs pos="35000"><a:schemeClr val="phClr"><a:tint val="37000"/><a:satMod val="300000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:tint val="15000"/><a:satMod val="350000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="16200000" scaled="1"/></a:gradFill>'
-            . '<a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:shade val="51000"/><a:satMod val="130000"/></a:schemeClr></a:gs><a:gs pos="80000"><a:schemeClr val="phClr"><a:shade val="93000"/><a:satMod val="130000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="94000"/><a:satMod val="350000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="16200000" scaled="0"/></a:gradFill>'
-            . '</a:fillStyleLst>'
-            . '<a:lnStyleLst>'
-            . '<a:ln w="9525" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/><a:miter lim="800000"/></a:ln>'
-            . '<a:ln w="25400" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/><a:miter lim="800000"/></a:ln>'
-            . '<a:ln w="38100" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/><a:miter lim="800000"/></a:ln>'
-            . '</a:lnStyleLst>'
-            . '<a:effectStyleLst>'
-            . '<a:effectStyle><a:effectLst><a:outerShdw blurRad="40000" dist="20000" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="38000"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle>'
-            . '<a:effectStyle><a:effectLst><a:outerShdw blurRad="40000" dist="23000" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="35000"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle>'
-            . '<a:effectStyle><a:effectLst><a:outerShdw blurRad="40000" dist="23000" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="35000"/></a:srgbClr></a:outerShdw></a:effectLst><a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0" lon="0" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"><a:rot lat="0" lon="0" rev="1200000"/></a:lightRig></a:scene3d><a:sp3d><a:bevelT w="63500" h="25400"/></a:sp3d></a:effectStyle>'
-            . '</a:effectStyleLst>'
-            . '<a:bgFillStyleLst>'
-            . '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
-            . '<a:solidFill><a:schemeClr val="phClr"><a:tint val="95000"/><a:satMod val="170000"/></a:schemeClr></a:solidFill>'
-            . '<a:gradFill rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="93000"/><a:satMod val="150000"/><a:shade val="98000"/><a:lumMod val="102000"/></a:schemeClr></a:gs><a:gs pos="50000"><a:schemeClr val="phClr"><a:tint val="98000"/><a:satMod val="130000"/><a:shade val="90000"/><a:lumMod val="103000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="63000"/><a:satMod val="120000"/><a:lumMod val="120000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="16200000" scaled="0"/></a:gradFill>'
-            . '</a:bgFillStyleLst>'
-            . '</a:fmtScheme>'
             . '</a:themeElements>'
-            . '<a:objectDefaults/><a:extraClrSchemeLst/>'
             . '</a:theme>';
     }
 
@@ -664,13 +654,28 @@ class NF_XLSX_Stream_Exporter {
     }
 
     private function build_docprops_app_xml(): string {
+        $sheetNames = [$this->submissionsSheetName];
+
+        if ($this->attachmentsSheetInitialized) {
+            $sheetNames[] = $this->attachmentsSheetName;
+        }
+
+        $sheetCount = count($sheetNames);
+        $titlesVector = '<TitlesOfParts><vt:vector size="' . $sheetCount . '" baseType="lpstr">';
+
+        foreach ($sheetNames as $name) {
+            $titlesVector .= '<vt:lpstr>' . self::xml_escape($name) . '</vt:lpstr>';
+        }
+
+        $titlesVector .= '</vt:vector></TitlesOfParts>';
+
         return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             . '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
             . '<Application>NF CPT → XLSX Inline Export</Application>'
             . '<DocSecurity>0</DocSecurity>'
             . '<ScaleCrop>false</ScaleCrop>'
-            . '<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>2</vt:i4></vt:variant></vt:vector></HeadingPairs>'
-            . '<TitlesOfParts><vt:vector size="2" baseType="lpstr"><vt:lpstr>' . self::xml_escape($this->submissionsSheetName) . '</vt:lpstr><vt:lpstr>' . self::xml_escape($this->attachmentsSheetName) . '</vt:lpstr></vt:vector></TitlesOfParts>'
+            . '<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>' . $sheetCount . '</vt:i4></vt:variant></vt:vector></HeadingPairs>'
+            . $titlesVector
             . '<Company>' . self::xml_escape(get_bloginfo('name')) . '</Company>'
             . '<LinksUpToDate>false</LinksUpToDate>'
             . '<SharedDoc>false</SharedDoc>'
