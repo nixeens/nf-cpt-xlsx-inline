@@ -5,6 +5,7 @@ use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Style;
 use PhpOffice\PhpSpreadsheet\Worksheet\Drawing;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -82,7 +83,7 @@ class NF_XLSX_Stream_Exporter {
             $cell = $this->cell($this->submissionsSheet, $columnIndex, 1);
             $cell->setValueExplicit($headerText, DataType::TYPE_STRING);
 
-            $style = $this->submissionsSheet->getStyleByColumnAndRow($columnIndex, 1);
+            $style = $this->style($this->submissionsSheet, $columnIndex, 1);
             $style->getFont()->setBold(true);
             $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
             $style->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
@@ -149,7 +150,7 @@ class NF_XLSX_Stream_Exporter {
         $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
         $cell->setValueExplicit($value, DataType::TYPE_STRING);
 
-        $style = $this->submissionsSheet->getStyleByColumnAndRow($columnIndex, $rowIndex);
+        $style = $this->style($this->submissionsSheet, $columnIndex, $rowIndex);
         $style->getAlignment()->setWrapText(true);
         $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
 
@@ -268,7 +269,7 @@ class NF_XLSX_Stream_Exporter {
             $cell->setValueExplicit($url, DataType::TYPE_STRING);
         }
 
-        $style = $this->submissionsSheet->getStyleByColumnAndRow($columnIndex, $rowIndex);
+        $style = $this->style($this->submissionsSheet, $columnIndex, $rowIndex);
         $style->getAlignment()->setWrapText(true);
 
         $this->ensureRowHeight($rowIndex, 24.0);
@@ -286,7 +287,7 @@ class NF_XLSX_Stream_Exporter {
         $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(4, 1, __('Status', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
 
         for ($col = 1; $col <= 4; $col++) {
-            $style = $this->attachmentsSheet->getStyleByColumnAndRow($col, 1);
+            $style = $this->style($this->attachmentsSheet, $col, 1);
             $style->getFont()->setBold(true);
             $style->getAlignment()->setWrapText(true);
             $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
@@ -324,8 +325,9 @@ class NF_XLSX_Stream_Exporter {
         $sheet->setCellValueExplicitByColumnAndRow(4, $this->attachmentsRow, $status, DataType::TYPE_STRING);
 
         for ($col = 1; $col <= 4; $col++) {
-            $sheet->getStyleByColumnAndRow($col, $this->attachmentsRow)->getAlignment()->setWrapText(true);
-            $sheet->getStyleByColumnAndRow($col, $this->attachmentsRow)->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
+            $style = $this->style($sheet, $col, $this->attachmentsRow);
+            $style->getAlignment()->setWrapText(true);
+            $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
         }
     }
     private function ensureRowHeight(int $rowIndex, float $heightPx): void {
@@ -439,6 +441,10 @@ class NF_XLSX_Stream_Exporter {
 
     private function cell(Worksheet $sheet, int $columnIndex, int $rowIndex): Cell {
         return $sheet->getCell($this->coordinate($columnIndex, $rowIndex));
+    }
+
+    private function style(Worksheet $sheet, int $columnIndex, int $rowIndex): Style {
+        return $sheet->getStyle($this->coordinate($columnIndex, $rowIndex));
     }
     private static function image_entries_from_value(array $payload): array {
         $urls = [];
