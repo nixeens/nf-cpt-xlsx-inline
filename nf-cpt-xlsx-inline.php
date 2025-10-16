@@ -79,6 +79,8 @@ add_action('plugins_loaded', 'nf_xlsx_register_local_autoloaders', 1);
 
 require_once __DIR__ . '/class-nf-xlsx-stream-exporter.php';
 
+register_activation_hook(__FILE__, 'nf_xlsx_generate_activation_sample');
+
 // -----------------------------------------------------------------------------
 // Admin UI registration.
 // -----------------------------------------------------------------------------
@@ -376,6 +378,167 @@ function nf_xlsx_redirect_error($message) {
 
     wp_safe_redirect($redirect);
     exit;
+}
+
+// -----------------------------------------------------------------------------
+// Activation sample workbook (simple smoke test).
+// -----------------------------------------------------------------------------
+function nf_xlsx_seed_sample_asset(string $directory, string $urlBase, string $filename, string $base64): ?array {
+    $binary = base64_decode($base64, true);
+    if ($binary === false) {
+        return null;
+    }
+
+    if (!wp_mkdir_p($directory)) {
+        return null;
+    }
+
+    $unique = function_exists('wp_unique_filename')
+        ? wp_unique_filename($directory, $filename)
+        : (uniqid('nf-sample-', true) . '-' . $filename);
+
+    $targetDirectory = trailingslashit($directory);
+    $path            = $targetDirectory . $unique;
+
+    if (file_put_contents($path, $binary) === false) {
+        return null;
+    }
+
+    return [
+        'name' => $unique,
+        'path' => $path,
+        'url'  => trailingslashit($urlBase) . $unique,
+    ];
+}
+
+function nf_xlsx_sample_image_base64(): string {
+    return 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAATklEQVR42u3PQQkAAAgEsIt2/UtpBN/CYAWWaV+LgICAgICAgICAgICAgICAgICAgICAgICAgICAg'
+        . 'ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg'
+        . 'ICAgICAgICAgICAgICAgICAgICAgMBlAflF8VpbbnTDAAAAAElFTkSuQmCC';
+}
+
+function nf_xlsx_sample_pdf_base64(): string {
+    return 'JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0g'
+        . 'L0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIg'
+        . 'L1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA2MSA+PgpzdHJlYW0KQlQgL0YxIDI0IFRmIDcy'
+        . 'IDcyMCBUZCAoTkYgWExTWCBJbmxpbmUgU2FtcGxlIFBERikgVGogRVQKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBl'
+        . 'MSAvQmFzZUZvbnQgL0hlbHZldGljYSA+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAw'
+        . 'MDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAowMDAwMDAwMjQxIDAwMDAwIG4gCjAwMDAwMDAzNDcgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA2IC9Sb290IDEgMCBS'
+        . 'ID4+CnN0YXJ0eHJlZgo0MTcKJSVFT0Y=';
+}
+
+function nf_xlsx_generate_activation_sample() {
+    if (!function_exists('wp_upload_dir')) {
+        return;
+    }
+
+    try {
+        nf_xlsx_register_local_autoloaders();
+
+        $form = [
+            'id'    => 0,
+            'title' => __('Activation Sample', 'nf-cpt-xlsx-inline'),
+        ];
+
+        $fields = [
+            [
+                'id'         => 9001,
+                'key'        => 'sample_text',
+                'label'      => __('Sample Text', 'nf-cpt-xlsx-inline'),
+                'type'       => 'textbox',
+                'identifier' => nf_xlsx_field_identifier(9001),
+            ],
+            [
+                'id'         => 9002,
+                'key'        => 'sample_image',
+                'label'      => __('Sample Image Upload', 'nf-cpt-xlsx-inline'),
+                'type'       => 'file',
+                'identifier' => nf_xlsx_field_identifier(9002),
+            ],
+            [
+                'id'         => 9003,
+                'key'        => 'sample_pdf',
+                'label'      => __('Sample PDF Upload', 'nf-cpt-xlsx-inline'),
+                'type'       => 'file',
+                'identifier' => nf_xlsx_field_identifier(9003),
+            ],
+            [
+                'id'         => 9004,
+                'key'        => 'rich_text',
+                'label'      => __('Rich Text Content', 'nf-cpt-xlsx-inline'),
+                'type'       => 'textarea',
+                'identifier' => nf_xlsx_field_identifier(9004),
+            ],
+        ];
+
+        $columns = nf_xlsx_prepare_columns($fields);
+        if (!$columns) {
+            return;
+        }
+
+        $uploads = wp_upload_dir();
+        if (!empty($uploads['error'])) {
+            return;
+        }
+
+        $sampleDirectory = trailingslashit($uploads['path']) . 'nf-xlsx-inline-samples';
+        $sampleUrlBase   = trailingslashit($uploads['url']) . 'nf-xlsx-inline-samples';
+
+        if (!wp_mkdir_p($sampleDirectory)) {
+            return;
+        }
+
+        $imageSeed = nf_xlsx_seed_sample_asset($sampleDirectory, $sampleUrlBase, 'sample-image.png', nf_xlsx_sample_image_base64());
+        $pdfSeed   = nf_xlsx_seed_sample_asset($sampleDirectory, $sampleUrlBase, 'sample.pdf', nf_xlsx_sample_pdf_base64());
+
+        if (!$imageSeed || !$pdfSeed) {
+            return;
+        }
+
+        $imageMeta = wp_json_encode([
+            'file_name' => $imageSeed['name'],
+            'file_path' => $imageSeed['path'],
+            'url'       => $imageSeed['url'],
+        ]);
+
+        $pdfMeta = wp_json_encode([
+            'file_name' => $pdfSeed['name'],
+            'file_path' => $pdfSeed['path'],
+            'url'       => $pdfSeed['url'],
+        ]);
+
+        $submissions = [
+            [
+                'id'       => 1,
+                'sub_date' => current_time('mysql', true),
+                'status'   => 'publish',
+                'meta'     => [
+                    'sample_text'  => [__('This workbook was generated on activation.', 'nf-cpt-xlsx-inline')],
+                    'sample_image' => [$imageMeta],
+                    'sample_pdf'   => [$pdfMeta],
+                    'rich_text'    => [
+                        sprintf(
+                            __('Inline assets for review: %1$s and %2$s', 'nf-cpt-xlsx-inline'),
+                            $imageSeed['url'],
+                            $pdfSeed['url']
+                        ),
+                    ],
+                ],
+            ],
+        ];
+
+        if (!wp_mkdir_p($uploads['path'])) {
+            return;
+        }
+
+        $filename = 'nf-xlsx-inline-sample-' . gmdate('Y-m-d-H-i-s') . '.xlsx';
+        $filepath = trailingslashit($uploads['path']) . $filename;
+
+        $exporter = new NF_XLSX_Stream_Exporter($form, $columns, $submissions);
+        $exporter->save($filepath);
+    } catch (Throwable $exception) {
+        error_log('NF XLSX sample generation failed: ' . $exception->getMessage());
+    }
 }
 
 // -----------------------------------------------------------------------------

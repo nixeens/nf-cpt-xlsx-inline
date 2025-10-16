@@ -1,30 +1,38 @@
 <?php
 
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Worksheet\Drawing;
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+
 class NF_XLSX_Stream_Exporter {
+    private const PDF_ICON_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAVklEQVR42u3PQQ0AMAzEsOOPrCDGpeOwSe3HUQg4'
+        . 'lfzc2wUAAAAAAAAAAAAAAAAAAOANcGp3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgMkv31CxpiuECMgAAAAASUVORK5CYII=';
     private array $form;
     private array $columns;
     private array $submissions;
-    private array $sharedStrings = [];
-    private array $sharedLookup = [];
-    private array $sheetRows = [
-        'submissions' => [],
-        'attachments' => [],
-    ];
-    private array $rowMeta = [
-        'submissions' => [],
-        'attachments' => [],
-    ];
-    private array $images = [];
+
+    private Spreadsheet $spreadsheet;
+    private Worksheet $submissionsSheet;
+    private ?Worksheet $attachmentsSheet = null;
+    private int $attachmentsRow = 1;
+
     private array $imageCache = [];
-    private array $pdfs = [];
     private array $pdfCache = [];
+    private array $tempFiles = [];
+    private array $rowHeights = [];
+    private array $cellOffsets = [];
+
     private int $imageCounter = 0;
     private int $pdfCounter = 0;
-    private int $attachmentsRowIndex = 1;
-    private bool $attachmentsSheetInitialized = false;
+
     private string $submissionsSheetName;
     private string $attachmentsSheetName;
 
+    private ?string $pdfIconPath = null;
     public function __construct(array $form, array $columns, array $submissions) {
         $this->form        = $form;
         $this->columns     = array_values($columns);
@@ -33,46 +41,64 @@ class NF_XLSX_Stream_Exporter {
         $this->submissionsSheetName = self::sanitize_sheet_name(__('Submissions', 'nf-cpt-xlsx-inline'));
         $this->attachmentsSheetName = self::sanitize_sheet_name(__('Attachments', 'nf-cpt-xlsx-inline'));
 
-        $this->initialise_sheets();
+        $this->initialiseSheets();
     }
 
-    private function initialise_sheets(): void {
-        $this->add_submission_headers();
+    public function __destruct() {
+        $this->cleanupTempFiles();
+    }
+
+    public function save(string $filepath): void {
+        $this->spreadsheet->setActiveSheetIndex(0);
+        $writer = new Xlsx($this->spreadsheet);
+        $writer->setPreCalculateFormulas(false);
+        $writer->save($filepath);
+        $this->spreadsheet->disconnectWorksheets();
+        $this->cleanupTempFiles();
+    }
+    private function initialiseSheets(): void {
+        $this->spreadsheet = new Spreadsheet();
+        $this->spreadsheet->getDefaultStyle()->getFont()->setName('Calibri')->setSize(11);
+
+        $this->submissionsSheet = $this->spreadsheet->getActiveSheet();
+        $this->submissionsSheet->setTitle($this->submissionsSheetName);
+
+        $this->addSubmissionHeaders();
+
         if (empty($this->submissions)) {
-            $this->add_no_submissions_row();
+            $this->addNoSubmissionsRow();
         } else {
-            $this->populate_submissions();
+            $this->populateSubmissions();
         }
-    }
 
-    private function add_submission_headers(): void {
+        $this->submissionsSheet->freezePane('A2');
+    }
+    private function addSubmissionHeaders(): void {
         foreach ($this->columns as $column) {
-            $this->add_cell('submissions', 1, (int) $column['index'], (string) $column['header']);
+            $columnIndex = (int) $column['index'];
+            $headerText  = (string) $column['header'];
+
+            $cell = $this->submissionsSheet->getCellByColumnAndRow($columnIndex, 1);
+            $cell->setValueExplicit($headerText, DataType::TYPE_STRING);
+
+            $style = $this->submissionsSheet->getStyleByColumnAndRow($columnIndex, 1);
+            $style->getFont()->setBold(true);
+            $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+            $style->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
+            $style->getAlignment()->setWrapText(true);
+
+            $this->submissionsSheet->getColumnDimensionByColumn($columnIndex)->setAutoSize(true);
         }
     }
 
-    private function add_attachments_header(): void {
-        $headers = [
-            __('Row', 'nf-cpt-xlsx-inline'),
-            __('Column', 'nf-cpt-xlsx-inline'),
-            __('Original URL', 'nf-cpt-xlsx-inline'),
-            __('Embedded Part', 'nf-cpt-xlsx-inline'),
-        ];
-
-        $columnIndex = 1;
-        foreach ($headers as $header) {
-            $this->add_cell('attachments', 1, $columnIndex, (string) $header);
-            ++$columnIndex;
-        }
-    }
-
-    private function add_no_submissions_row(): void {
+    private function addNoSubmissionsRow(): void {
         $message = __('No submissions available for this form.', 'nf-cpt-xlsx-inline');
-        $this->add_cell('submissions', 2, 1, $message);
-        $this->rowMeta['submissions'][2]['max'] = max(1, $this->rowMeta['submissions'][2]['max'] ?? 1);
+        $cell    = $this->submissionsSheet->getCellByColumnAndRow(1, 2);
+        $cell->setValueExplicit($message, DataType::TYPE_STRING);
+        $this->submissionsSheet->getStyle('A2')->getAlignment()->setWrapText(true);
+        $this->ensureRowHeight(2, 22.0);
     }
-
-    private function populate_submissions(): void {
+    private function populateSubmissions(): void {
         $rowIndex = 2;
 
         foreach ($this->submissions as $submission) {
@@ -80,9 +106,9 @@ class NF_XLSX_Stream_Exporter {
                 $columnIndex = (int) $column['index'];
 
                 if ($column['field'] === null) {
-                    $dateText = nf_xlsx_format_date($submission['sub_date']);
+                    $dateText = nf_xlsx_format_date($submission['sub_date'] ?? '');
                     if ($dateText !== '') {
-                        $this->add_cell('submissions', $rowIndex, $columnIndex, $dateText);
+                        $this->writeCellText($columnIndex, $rowIndex, $dateText);
                     }
                     continue;
                 }
@@ -90,25 +116,46 @@ class NF_XLSX_Stream_Exporter {
                 $payload = nf_xlsx_extract_submission_field_payload($submission, $column['field']);
 
                 if ($payload['text'] !== '') {
-                    $this->add_cell('submissions', $rowIndex, $columnIndex, $payload['text']);
+                    $this->writeCellText($columnIndex, $rowIndex, (string) $payload['text']);
+                }
+
+                if (!empty($payload['links'])) {
+                    $this->submissionsSheet
+                        ->getCellByColumnAndRow($columnIndex, $rowIndex)
+                        ->getHyperlink()
+                        ->setUrl($payload['links'][0])
+                        ->setTooltip(__('Open link', 'nf-cpt-xlsx-inline'));
                 }
 
                 $imageUrls = self::image_entries_from_value($payload);
-                foreach ($imageUrls as $imageUrl) {
-                    $this->add_image($imageUrl, $rowIndex, $columnIndex);
+                if ($imageUrls) {
+                    foreach ($imageUrls as $imageUrl) {
+                        $this->addImage($imageUrl, $rowIndex, $columnIndex);
+                    }
                 }
 
                 $pdfUrls = self::pdf_entries_from_value($payload);
-                foreach ($pdfUrls as $pdfUrl) {
-                    $this->add_pdf($pdfUrl, $rowIndex, $column);
+                if ($pdfUrls) {
+                    foreach ($pdfUrls as $pdfUrl) {
+                        $this->addPdf($pdfUrl, $rowIndex, $column);
+                    }
                 }
             }
 
             ++$rowIndex;
         }
     }
+    private function writeCellText(int $columnIndex, int $rowIndex, string $value): void {
+        $cell = $this->submissionsSheet->getCellByColumnAndRow($columnIndex, $rowIndex);
+        $cell->setValueExplicit($value, DataType::TYPE_STRING);
 
-    private function add_image(string $url, int $rowIndex, int $columnIndex): void {
+        $style = $this->submissionsSheet->getStyleByColumnAndRow($columnIndex, $rowIndex);
+        $style->getAlignment()->setWrapText(true);
+        $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
+
+        $this->ensureRowHeight($rowIndex, 22.0);
+    }
+    private function addImage(string $url, int $rowIndex, int $columnIndex): void {
         $cacheKey = md5($url);
 
         if (!array_key_exists($cacheKey, $this->imageCache)) {
@@ -117,35 +164,47 @@ class NF_XLSX_Stream_Exporter {
 
         $imageData = $this->imageCache[$cacheKey];
         if (!$imageData) {
+            $this->fallbackLink($url, $columnIndex, $rowIndex);
             return;
         }
 
         ++$this->imageCounter;
 
-        $fileName = 'image' . $this->imageCounter . '.' . $imageData['extension'];
-        $widthPx  = (float) ($imageData['width'] ?? 120);
-        $heightPx = (float) ($imageData['height'] ?? 120);
-        $heightPt = max(60.0, self::pixels_to_points($heightPx));
+        $maxWidth  = 240.0;
+        $maxHeight = 220.0;
+        $widthPx   = (float) ($imageData['width'] ?? 120.0);
+        $heightPx  = (float) ($imageData['height'] ?? 120.0);
 
-        $this->rowMeta['submissions'][$rowIndex]['height'] = max(
-            $heightPt,
-            $this->rowMeta['submissions'][$rowIndex]['height'] ?? 0.0
+        $scale = min(1.0, $maxWidth / max(1.0, $widthPx), $maxHeight / max(1.0, $heightPx));
+        $targetWidth  = max(20.0, $widthPx * $scale);
+        $targetHeight = max(20.0, $heightPx * $scale);
+
+        $tempPath = $this->writeTempFile(
+            $imageData['data'],
+            'nf-image-' . $this->imageCounter . '.' . $imageData['extension']
         );
 
-        $this->images[] = [
-            'path'       => 'xl/media/' . $fileName,
-            'data'       => $imageData['data'],
-            'mime'       => $imageData['mime'],
-            'extension'  => $imageData['extension'],
-            'row'        => $rowIndex,
-            'column'     => $columnIndex,
-            'width_emu'  => self::pixels_to_emu($widthPx),
-            'height_emu' => self::pixels_to_emu($heightPx),
-        ];
-    }
+        if (!$tempPath) {
+            $this->fallbackLink($url, $columnIndex, $rowIndex);
+            return;
+        }
 
-    private function add_pdf(string $url, int $rowIndex, array $column): void {
-        $cacheKey = md5($url);
+        $drawing = new Drawing();
+        $drawing->setName(sprintf(__('Image %d', 'nf-cpt-xlsx-inline'), $this->imageCounter));
+        $drawing->setDescription($url);
+        $drawing->setPath($tempPath);
+        $drawing->setCoordinates($this->coordinate($columnIndex, $rowIndex));
+        $drawing->setResizeProportional(true);
+        $drawing->setWidth((int) round($targetWidth));
+        $drawing->setWorksheet($this->submissionsSheet);
+
+        $offsetY = $this->reserveCellOffset($rowIndex, $columnIndex, $targetHeight);
+        $drawing->setOffsetX(4);
+        $drawing->setOffsetY($offsetY);
+    }
+    private function addPdf(string $url, int $rowIndex, array $column): void {
+        $columnIndex = (int) $column['index'];
+        $cacheKey    = md5($url);
 
         if (!array_key_exists($cacheKey, $this->pdfCache)) {
             $this->pdfCache[$cacheKey] = self::fetch_pdf_bin($url);
@@ -153,576 +212,230 @@ class NF_XLSX_Stream_Exporter {
 
         $pdfBinary = $this->pdfCache[$cacheKey];
         if ($pdfBinary === null) {
+            $this->fallbackLink($url, $columnIndex, $rowIndex);
+            $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, false);
             return;
         }
-
-        $this->ensure_attachments_sheet();
 
         ++$this->pdfCounter;
 
-        $fileName = 'file' . $this->pdfCounter . '.pdf';
-        $partName = 'xl/embeddings/' . $fileName;
-
-        $this->pdfs[] = [
-            'path' => $partName,
-            'data' => $pdfBinary,
-        ];
-
-        $columnLabel = isset($column['header']) ? (string) $column['header'] : '';
-        $this->add_attachment_row($rowIndex, $columnLabel, $url, $partName);
-    }
-
-    private function add_attachment_row(int $sourceRow, string $columnLabel, string $url, string $partName): void {
-        ++$this->attachmentsRowIndex;
-        $rowIndex = $this->attachmentsRowIndex;
-
-        $this->add_cell('attachments', $rowIndex, 1, (string) $sourceRow);
-        $this->add_cell('attachments', $rowIndex, 2, $columnLabel);
-        $this->add_cell('attachments', $rowIndex, 3, $url);
-        $this->add_cell('attachments', $rowIndex, 4, $partName);
-    }
-
-    private function ensure_attachments_sheet(): void {
-        if ($this->attachmentsSheetInitialized) {
+        $pdfTemp = $this->writeTempFile($pdfBinary, 'nf-pdf-' . $this->pdfCounter . '.pdf');
+        if (!$pdfTemp) {
+            $this->fallbackLink($url, $columnIndex, $rowIndex);
+            $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, false);
             return;
         }
 
-        $this->attachmentsSheetInitialized = true;
-        $this->attachmentsRowIndex         = 1;
-        $this->sheetRows['attachments']    = [];
-        $this->rowMeta['attachments']      = [];
-
-        $this->add_attachments_header();
-    }
-
-    private function add_cell(string $sheet, int $rowIndex, int $columnIndex, string $value): void {
-        $value = trim((string) $value);
-
-        $this->ensure_row($sheet, $rowIndex);
-
-        if ($value === '') {
-            $this->rowMeta[$sheet][$rowIndex]['max'] = max(
-                $columnIndex,
-                $this->rowMeta[$sheet][$rowIndex]['max'] ?? 0
-            );
+        $iconPath = $this->getPdfIconPath();
+        if (!$iconPath) {
+            $this->fallbackLink($url, $columnIndex, $rowIndex);
+            $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, true);
             return;
         }
 
-        $sharedIndex = $this->register_shared_string($value);
+        $drawing = new Drawing();
+        $drawing->setName(sprintf(__('PDF %d', 'nf-cpt-xlsx-inline'), $this->pdfCounter));
+        $drawing->setDescription($url);
+        $drawing->setPath($iconPath);
+        $drawing->setCoordinates($this->coordinate($columnIndex, $rowIndex));
+        $drawing->setResizeProportional(true);
+        $drawing->setHeight(22);
+        $drawing->setWorksheet($this->submissionsSheet);
 
-        $this->sheetRows[$sheet][$rowIndex][] = [
-            'column' => $columnIndex,
-            'shared' => $sharedIndex,
-        ];
+        $offsetY = $this->reserveCellOffset($rowIndex, $columnIndex, 22.0);
+        $drawing->setOffsetX(2);
+        $drawing->setOffsetY($offsetY);
 
-        $this->rowMeta[$sheet][$rowIndex]['max'] = max(
-            $columnIndex,
-            $this->rowMeta[$sheet][$rowIndex]['max'] ?? 0
-        );
+        $cell = $this->submissionsSheet->getCellByColumnAndRow($columnIndex, $rowIndex);
+        $cell->getHyperlink()->setUrl($url);
+        $cell->getHyperlink()->setTooltip(__('Open PDF', 'nf-cpt-xlsx-inline'));
+
+        $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, true);
     }
-
-    private function ensure_row(string $sheet, int $rowIndex): void {
-        if (!isset($this->sheetRows[$sheet][$rowIndex])) {
-            $this->sheetRows[$sheet][$rowIndex] = [];
+    private function fallbackLink(string $url, int $columnIndex, int $rowIndex): void {
+        if ($url === '') {
+            return;
         }
 
-        if (!isset($this->rowMeta[$sheet][$rowIndex])) {
-            $this->rowMeta[$sheet][$rowIndex] = [
-                'max'    => 0,
-                'height' => 0,
-            ];
-        }
-    }
+        $cell = $this->submissionsSheet->getCellByColumnAndRow($columnIndex, $rowIndex);
+        $existing = (string) $cell->getValue();
 
-    private function register_shared_string(string $value): int {
-        $value = self::normalise_string($value);
-
-        if (isset($this->sharedLookup[$value])) {
-            return $this->sharedLookup[$value];
-        }
-
-        $index = count($this->sharedStrings);
-        $this->sharedStrings[$index] = $value;
-        $this->sharedLookup[$value]  = $index;
-
-        return $index;
-    }
-
-    public function save(string $filepath): void {
-        if ($this->images) {
-            $relationIndex = 1;
-
-            foreach ($this->images as $index => $image) {
-                $this->images[$index]['rid']      = 'rId' . $relationIndex;
-                $this->images[$index]['shape_id'] = $relationIndex;
-                ++$relationIndex;
+        if ($existing !== '') {
+            if (strpos($existing, $url) === false) {
+                $cell->setValueExplicit($existing . "\n" . $url, DataType::TYPE_STRING);
             }
-        }
-
-        $sharedStringsXml = $this->build_shared_strings_xml();
-        $sheet1Xml        = $this->build_submissions_sheet_xml();
-        $sheet2Xml        = $this->attachmentsSheetInitialized ? $this->build_attachments_sheet_xml() : '';
-        $workbookXml      = $this->build_workbook_xml();
-        $workbookRelsXml  = $this->build_workbook_rels_xml();
-        $contentTypesXml  = $this->build_content_types_xml();
-        $packageRelsXml   = $this->build_package_rels_xml();
-        $stylesXml        = $this->build_styles_xml();
-        $themeXml         = $this->build_theme_xml();
-        $coreXml          = $this->build_docprops_core_xml();
-        $appXml           = $this->build_docprops_app_xml();
-
-        $zip = new ZipArchive();
-        $openResult = $zip->open($filepath, ZipArchive::OVERWRITE | ZipArchive::CREATE);
-
-        if ($openResult !== true) {
-            throw new RuntimeException(__('Unable to create workbook archive.', 'nf-cpt-xlsx-inline'));
-        }
-
-        $zip->addFromString('[Content_Types].xml', $contentTypesXml);
-        $zip->addFromString('_rels/.rels', $packageRelsXml);
-        $zip->addFromString('docProps/core.xml', $coreXml);
-        $zip->addFromString('docProps/app.xml', $appXml);
-        $zip->addFromString('xl/workbook.xml', $workbookXml);
-        $zip->addFromString('xl/_rels/workbook.xml.rels', $workbookRelsXml);
-        $zip->addFromString('xl/styles.xml', $stylesXml);
-        $zip->addFromString('xl/theme/theme1.xml', $themeXml);
-        $zip->addFromString('xl/sharedStrings.xml', $sharedStringsXml);
-        $zip->addFromString('xl/worksheets/sheet1.xml', $sheet1Xml);
-
-        if ($this->attachmentsSheetInitialized) {
-            $zip->addFromString('xl/worksheets/sheet2.xml', $sheet2Xml);
-        }
-
-        if ($this->images) {
-            $zip->addFromString('xl/worksheets/_rels/sheet1.xml.rels', $this->build_sheet1_rels_xml());
-            $zip->addFromString('xl/drawings/drawing1.xml', $this->build_drawing_xml());
-            $zip->addFromString('xl/drawings/_rels/drawing1.xml.rels', $this->build_drawing_rels_xml());
-
-            foreach ($this->images as $image) {
-                $zip->addFromString($image['path'], $image['data']);
-            }
-        }
-
-        foreach ($this->pdfs as $pdf) {
-            $zip->addFromString($pdf['path'], $pdf['data']);
-        }
-
-        $zip->close();
-    }
-
-    private function build_submissions_sheet_xml(): string {
-        $dimension  = $this->build_dimension_for_sheet('submissions', count($this->columns));
-        $sheetViews = '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>';
-        $sheetData  = $this->build_sheet_data_xml('submissions');
-        $cols       = $this->build_submission_cols_xml();
-        $drawingTag = $this->images ? '<drawing r:id="rId1"/>' : '';
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            . '<dimension ref="' . $dimension . '"/>'
-            . $sheetViews
-            . '<sheetFormatPr defaultRowHeight="15"/>'
-            . $cols
-            . $sheetData
-            . '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>'
-            . $drawingTag
-            . '</worksheet>';
-    }
-
-    private function build_attachments_sheet_xml(): string {
-        $dimension  = $this->build_dimension_for_sheet('attachments', 4);
-        $sheetViews = '<sheetViews><sheetView workbookViewId="0"/></sheetViews>';
-        $sheetData  = $this->build_sheet_data_xml('attachments');
-        $cols       = $this->build_attachments_cols_xml();
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            . '<dimension ref="' . $dimension . '"/>'
-            . $sheetViews
-            . '<sheetFormatPr defaultRowHeight="15"/>'
-            . $cols
-            . $sheetData
-            . '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>'
-            . '</worksheet>';
-    }
-
-    private function build_sheet_data_xml(string $sheet): string {
-        $rows = $this->sheetRows[$sheet];
-
-        if (!$rows) {
-            return '<sheetData/>';
-        }
-
-        ksort($rows);
-
-        $xml = '<sheetData>';
-
-        foreach ($rows as $rowIndex => $cells) {
-            usort($cells, static function ($a, $b) {
-                return $a['column'] <=> $b['column'];
-            });
-
-            $fallbackMax = $sheet === 'submissions' ? max(1, count($this->columns)) : 4;
-            $metaMax     = $this->rowMeta[$sheet][$rowIndex]['max'] ?? 0;
-            $maxCol      = max(1, $metaMax ? $metaMax : $fallbackMax);
-            $height   = (float) ($this->rowMeta[$sheet][$rowIndex]['height'] ?? 0);
-            $rowAttrs = sprintf('r="%d" spans="1:%d"', $rowIndex, $maxCol);
-
-            if ($height > 0) {
-                $rowAttrs .= sprintf(' ht="%.2F" customHeight="1"', $height);
-            }
-
-            $xml .= '<row ' . $rowAttrs . '>';
-
-            foreach ($cells as $cell) {
-                $coordinate = nf_addr($cell['column'], $rowIndex);
-                $xml       .= '<c r="' . $coordinate . '" t="s"><v>' . $cell['shared'] . '</v></c>';
-            }
-
-            $xml .= '</row>';
-        }
-
-        $xml .= '</sheetData>';
-
-        return $xml;
-    }
-
-    private function build_submission_cols_xml(): string {
-        if (!$this->columns) {
-            return '';
-        }
-
-        $cols = '<cols>';
-
-        foreach ($this->columns as $column) {
-            $width = $column['field'] === null ? 22.0 : 30.0;
-            $index = (int) $column['index'];
-
-            $cols .= sprintf('<col min="%d" max="%d" width="%.2F" customWidth="1"/>', $index, $index, $width);
-        }
-
-        $cols .= '</cols>';
-
-        return $cols;
-    }
-
-    private function build_attachments_cols_xml(): string {
-        $widths = [12.0, 28.0, 60.0, 32.0];
-        $cols   = '<cols>';
-
-        foreach ($widths as $index => $width) {
-            $colIndex = $index + 1;
-            $cols    .= sprintf('<col min="%d" max="%d" width="%.2F" customWidth="1"/>', $colIndex, $colIndex, $width);
-        }
-
-        $cols .= '</cols>';
-
-        return $cols;
-    }
-
-    private function build_dimension_for_sheet(string $sheet, int $fallbackColumns): string {
-        $rows = $this->sheetRows[$sheet];
-
-        if (!$rows) {
-            return 'A1:' . nf_addr(max(1, $fallbackColumns), 1);
-        }
-
-        $maxRow = max(array_keys($rows));
-        $maxCol = $fallbackColumns;
-
-        foreach ($this->rowMeta[$sheet] as $meta) {
-            if (!empty($meta['max']) && $meta['max'] > $maxCol) {
-                $maxCol = (int) $meta['max'];
-            }
-        }
-
-        return 'A1:' . nf_addr(max(1, $maxCol), max(1, $maxRow));
-    }
-
-    private function build_shared_strings_xml(): string {
-        $uniqueCount = count($this->sharedStrings);
-        $count       = $uniqueCount;
-        $strings     = '';
-
-        foreach ($this->sharedStrings as $string) {
-            $escaped = self::xml_escape($string);
-
-            if ($escaped === '') {
-                $strings .= '<si><t/></si>';
-                continue;
-            }
-
-            if (preg_match('/^\s|\s$/', $string)) {
-                $strings .= '<si><t xml:space="preserve">' . $escaped . '</t></si>';
-            } else {
-                $strings .= '<si><t>' . $escaped . '</t></si>';
-            }
-        }
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="' . $count . '" uniqueCount="' . $uniqueCount . '">' . $strings . '</sst>';
-    }
-
-    private function build_workbook_xml(): string {
-        $sheetIndex = 1;
-        $sheetEntries = [];
-
-        $sheetEntries[] = '<sheet name="' . self::xml_escape($this->submissionsSheetName) . '" sheetId="' . $sheetIndex . '" r:id="rId' . $sheetIndex . '"/>';
-
-        if ($this->attachmentsSheetInitialized) {
-            $sheetIndex++;
-            $sheetEntries[] = '<sheet name="' . self::xml_escape($this->attachmentsSheetName) . '" sheetId="' . $sheetIndex . '" r:id="rId' . $sheetIndex . '"/>';
-        }
-
-        $sheets = '<sheets>' . implode('', $sheetEntries) . '</sheets>';
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            . '<workbookPr date1904="false"/>'
-            . '<bookViews><workbookView xWindow="0" yWindow="0" windowWidth="28800" windowHeight="14400"/></bookViews>'
-            . $sheets
-            . '</workbook>';
-    }
-
-    private function build_workbook_rels_xml(): string {
-        $relations = [
-            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-        ];
-
-        if ($this->attachmentsSheetInitialized) {
-            $relations[] = '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>';
-        }
-
-        $relations[] = '<Relationship Id="rIdSharedStrings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>';
-        $relations[] = '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
-        $relations[] = '<Relationship Id="rIdTheme" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>';
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            . implode('', $relations)
-            . '</Relationships>';
-    }
-
-    private function build_package_rels_xml(): string {
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
-            . '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
-            . '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
-            . '</Relationships>';
-    }
-
-    private function build_content_types_xml(): string {
-        $overrides = [
-            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>',
-            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>',
-            '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>',
-            '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>',
-            '<Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>',
-            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
-            '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>',
-        ];
-
-        if ($this->attachmentsSheetInitialized) {
-            $overrides[] = '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
-        }
-
-        if ($this->images) {
-            $overrides[] = '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>';
-        }
-
-        foreach ($this->pdfs as $index => $pdf) {
-            $overrides[] = '<Override PartName="/' . self::xml_escape($pdf['path']) . '" ContentType="application/pdf"/>';
-        }
-
-        $defaults = [
-            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
-            '<Default Extension="xml" ContentType="application/xml"/>',
-            '<Default Extension="png" ContentType="image/png"/>',
-            '<Default Extension="jpeg" ContentType="image/jpeg"/>',
-            '<Default Extension="jpg" ContentType="image/jpeg"/>',
-            '<Default Extension="gif" ContentType="image/gif"/>',
-            '<Default Extension="webp" ContentType="image/webp"/>',
-            '<Default Extension="pdf" ContentType="application/pdf"/>',
-        ];
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-            . implode('', $defaults)
-            . implode('', $overrides)
-            . '</Types>';
-    }
-
-    private function build_styles_xml(): string {
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-            . '<fonts count="1"><font><name val="Calibri"/><sz val="11"/></font></fonts>'
-            . '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>'
-            . '<borders count="1"><border/></borders>'
-            . '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-            . '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>'
-            . '</styleSheet>';
-    }
-
-    private function build_theme_xml(): string {
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">'
-            . '<a:themeElements>'
-            . '<a:clrScheme name="Office">'
-            . '<a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>'
-            . '<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>'
-            . '<a:dk2><a:srgbClr val="1F497D"/></a:dk2>'
-            . '<a:lt2><a:srgbClr val="EEECE1"/></a:lt2>'
-            . '</a:clrScheme>'
-            . '</a:themeElements>'
-            . '</a:theme>';
-    }
-
-    private function build_sheet1_rels_xml(): string {
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            . '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>'
-            . '</Relationships>';
-    }
-
-    private function build_drawing_xml(): string {
-        $anchors = '';
-
-        foreach ($this->images as $image) {
-            $col = max(0, (int) $image['column'] - 1);
-            $row = max(0, (int) $image['row'] - 1);
-
-            $anchors .= '<xdr:oneCellAnchor>'
-                . '<xdr:from>'
-                . '<xdr:col>' . $col . '</xdr:col>'
-                . '<xdr:colOff>0</xdr:colOff>'
-                . '<xdr:row>' . $row . '</xdr:row>'
-                . '<xdr:rowOff>0</xdr:rowOff>'
-                . '</xdr:from>'
-                . '<xdr:ext cx="' . $image['width_emu'] . '" cy="' . $image['height_emu'] . '"/>'
-                . '<xdr:pic>'
-                . '<xdr:nvPicPr>'
-                . '<xdr:cNvPr id="' . $image['shape_id'] . '" name="Picture ' . $image['shape_id'] . '"/>'
-                . '<xdr:cNvPicPr/>'
-                . '</xdr:nvPicPr>'
-                . '<xdr:blipFill>'
-                . '<a:blip r:embed="' . $image['rid'] . '"/>'
-                . '<a:stretch><a:fillRect/></a:stretch>'
-                . '</xdr:blipFill>'
-                . '<xdr:spPr>'
-                . '<a:xfrm><a:off x="0" y="0"/><a:ext cx="' . $image['width_emu'] . '" cy="' . $image['height_emu'] . '"/></a:xfrm>'
-                . '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
-                . '</xdr:spPr>'
-                . '</xdr:pic>'
-                . '<xdr:clientData/>'
-                . '</xdr:oneCellAnchor>';
-        }
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-            . $anchors
-            . '</xdr:wsDr>';
-    }
-
-    private function build_drawing_rels_xml(): string {
-        $relationships = '';
-
-        foreach ($this->images as $image) {
-            $relationships .= '<Relationship Id="' . $image['rid'] . '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/' . basename($image['path']) . '"/>';
-        }
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-            . $relationships
-            . '</Relationships>';
-    }
-
-    private function build_docprops_core_xml(): string {
-        $title    = isset($this->form['title']) ? (string) $this->form['title'] : '';
-        $blogName = get_bloginfo('name');
-        $creator  = $blogName ? (string) $blogName : 'NF CPT → XLSX Inline Export';
-        $now      = self::w3c_date();
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-            . '<dc:title>' . self::xml_escape(sprintf(__('NF Submissions Export – %s', 'nf-cpt-xlsx-inline'), $title)) . '</dc:title>'
-            . '<dc:creator>' . self::xml_escape($creator) . '</dc:creator>'
-            . '<cp:lastModifiedBy>NF CPT → XLSX Inline Export</cp:lastModifiedBy>'
-            . '<dcterms:created xsi:type="dcterms:W3CDTF">' . $now . '</dcterms:created>'
-            . '<dcterms:modified xsi:type="dcterms:W3CDTF">' . $now . '</dcterms:modified>'
-            . '</cp:coreProperties>';
-    }
-
-    private function build_docprops_app_xml(): string {
-        $sheetNames = [$this->submissionsSheetName];
-
-        if ($this->attachmentsSheetInitialized) {
-            $sheetNames[] = $this->attachmentsSheetName;
-        }
-
-        $sheetCount = count($sheetNames);
-        $titlesVector = '<TitlesOfParts><vt:vector size="' . $sheetCount . '" baseType="lpstr">';
-
-        foreach ($sheetNames as $name) {
-            $titlesVector .= '<vt:lpstr>' . self::xml_escape($name) . '</vt:lpstr>';
-        }
-
-        $titlesVector .= '</vt:vector></TitlesOfParts>';
-
-        return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            . '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
-            . '<Application>NF CPT → XLSX Inline Export</Application>'
-            . '<DocSecurity>0</DocSecurity>'
-            . '<ScaleCrop>false</ScaleCrop>'
-            . '<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant><vt:variant><vt:i4>' . $sheetCount . '</vt:i4></vt:variant></vt:vector></HeadingPairs>'
-            . $titlesVector
-            . '<Company>' . self::xml_escape(get_bloginfo('name')) . '</Company>'
-            . '<LinksUpToDate>false</LinksUpToDate>'
-            . '<SharedDoc>false</SharedDoc>'
-            . '<HyperlinksChanged>false</HyperlinksChanged>'
-            . '<AppVersion>16.0300</AppVersion>'
-            . '</Properties>';
-    }
-
-    private static function pixels_to_points(float $pixels): float {
-        return round($pixels * 72 / 96, 2);
-    }
-
-    private static function pixels_to_emu(float $pixels): int {
-        return (int) round($pixels * 9525);
-    }
-
-    private static function normalise_string(string $value): string {
-        $value = str_replace(["\r\n", "\r"], "\n", $value);
-
-        return $value;
-    }
-
-    private static function xml_escape(string $value): string {
-        return htmlspecialchars($value, ENT_XML1 | ENT_COMPAT, 'UTF-8');
-    }
-
-    private static function sanitize_sheet_name(string $name): string {
-        $name = preg_replace('/[\\\\\/*\[\]\?:]/', ' ', $name);
-        $name = trim((string) $name);
-
-        if ($name === '') {
-            $name = 'Sheet';
-        }
-
-        if (function_exists('mb_substr')) {
-            $name = mb_substr($name, 0, 31, 'UTF-8');
         } else {
-            $name = substr($name, 0, 31);
+            $cell->setValueExplicit($url, DataType::TYPE_STRING);
         }
 
-        return $name;
+        $style = $this->submissionsSheet->getStyleByColumnAndRow($columnIndex, $rowIndex);
+        $style->getAlignment()->setWrapText(true);
+
+        $this->ensureRowHeight($rowIndex, 24.0);
+    }
+    private function ensureAttachmentsSheet(): Worksheet {
+        if ($this->attachmentsSheet instanceof Worksheet) {
+            return $this->attachmentsSheet;
+        }
+
+        $this->attachmentsSheet = new Worksheet($this->spreadsheet, $this->attachmentsSheetName);
+        $this->spreadsheet->addSheet($this->attachmentsSheet);
+        $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(1, 1, __('Row', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
+        $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(2, 1, __('Column', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
+        $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(3, 1, __('Original URL', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
+        $this->attachmentsSheet->setCellValueExplicitByColumnAndRow(4, 1, __('Status', 'nf-cpt-xlsx-inline'), DataType::TYPE_STRING);
+
+        for ($col = 1; $col <= 4; $col++) {
+            $style = $this->attachmentsSheet->getStyleByColumnAndRow($col, 1);
+            $style->getFont()->setBold(true);
+            $style->getAlignment()->setWrapText(true);
+            $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
+        }
+
+        $this->attachmentsSheet->getColumnDimensionByColumn(1)->setWidth(12.0);
+        $this->attachmentsSheet->getColumnDimensionByColumn(2)->setWidth(28.0);
+        $this->attachmentsSheet->getColumnDimensionByColumn(3)->setWidth(60.0);
+        $this->attachmentsSheet->getColumnDimensionByColumn(4)->setWidth(26.0);
+
+        $this->attachmentsRow = 1;
+
+        return $this->attachmentsSheet;
     }
 
-    private static function w3c_date(): string {
-        return gmdate('Y-m-d\TH:i:s\Z');
+    private function addAttachmentRow(int $sourceRow, string $columnLabel, string $url, bool $downloaded): void {
+        $sheet = $this->ensureAttachmentsSheet();
+        ++$this->attachmentsRow;
+
+        $sheet->setCellValueExplicitByColumnAndRow(1, $this->attachmentsRow, (string) $sourceRow, DataType::TYPE_STRING);
+        $sheet->setCellValueExplicitByColumnAndRow(2, $this->attachmentsRow, (string) $columnLabel, DataType::TYPE_STRING);
+        $sheet->setCellValueExplicitByColumnAndRow(3, $this->attachmentsRow, (string) $url, DataType::TYPE_STRING);
+
+        if ($url !== '') {
+            $sheet->getCellByColumnAndRow(3, $this->attachmentsRow)
+                ->getHyperlink()
+                ->setUrl($url)
+                ->setTooltip(__('Open original file', 'nf-cpt-xlsx-inline'));
+        }
+
+        $status = $downloaded
+            ? __('Icon linked', 'nf-cpt-xlsx-inline')
+            : __('Download failed', 'nf-cpt-xlsx-inline');
+
+        $sheet->setCellValueExplicitByColumnAndRow(4, $this->attachmentsRow, $status, DataType::TYPE_STRING);
+
+        for ($col = 1; $col <= 4; $col++) {
+            $sheet->getStyleByColumnAndRow($col, $this->attachmentsRow)->getAlignment()->setWrapText(true);
+            $sheet->getStyleByColumnAndRow($col, $this->attachmentsRow)->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
+        }
+    }
+    private function ensureRowHeight(int $rowIndex, float $heightPx): void {
+        $heightPx = max($heightPx, 20.0);
+        $current  = $this->rowHeights[$rowIndex] ?? 0.0;
+
+        if ($heightPx > $current) {
+            $this->rowHeights[$rowIndex] = $heightPx;
+            $points = self::pixels_to_points($heightPx + 4.0);
+            $this->submissionsSheet->getRowDimension($rowIndex)->setRowHeight($points);
+        }
     }
 
+    private function reserveCellOffset(int $rowIndex, int $columnIndex, float $heightPx): int {
+        $key   = $rowIndex . ':' . $columnIndex;
+        $state = $this->cellOffsets[$key] ?? ['next' => 2, 'total' => 0];
+
+        $offset = (int) $state['next'];
+        $state['next']  = $offset + (int) ceil($heightPx) + 6;
+        $state['total'] = max($state['total'], $offset + (int) ceil($heightPx));
+        $this->cellOffsets[$key] = $state;
+
+        $this->ensureRowHeight($rowIndex, (float) $state['total'] + 8.0);
+
+        return $offset;
+    }
+    private function writeTempFile(string $binary, string $filename): ?string {
+        if ($binary === '') {
+            return null;
+        }
+
+        $tempPath = '';
+
+        if (function_exists('wp_tempnam')) {
+            $tempPath = wp_tempnam($filename);
+        }
+
+        if (!$tempPath) {
+            $tempPath = tempnam($this->tempDirectory(), 'nfx');
+            if ($tempPath && $filename) {
+                $extension = pathinfo($filename, PATHINFO_EXTENSION);
+                if ($extension) {
+                    $newPath = $tempPath . '.' . $extension;
+                    if (@rename($tempPath, $newPath)) {
+                        $tempPath = $newPath;
+                    }
+                }
+            }
+        }
+
+        if (!$tempPath) {
+            return null;
+        }
+
+        if (file_put_contents($tempPath, $binary) === false) {
+            return null;
+        }
+
+        $this->tempFiles[] = $tempPath;
+
+        return $tempPath;
+    }
+
+    private function tempDirectory(): string {
+        if (function_exists('get_temp_dir')) {
+            return get_temp_dir();
+        }
+
+        $uploadDir = function_exists('wp_upload_dir') ? wp_upload_dir() : null;
+        if (is_array($uploadDir) && empty($uploadDir['error']) && !empty($uploadDir['path'])) {
+            return trailingslashit($uploadDir['path']);
+        }
+
+        return sys_get_temp_dir();
+    }
+
+    private function cleanupTempFiles(): void {
+        foreach ($this->tempFiles as $path) {
+            if ($path && file_exists($path)) {
+                @unlink($path);
+            }
+        }
+        $this->tempFiles = [];
+    }
+
+    private function getPdfIconPath(): ?string {
+        if ($this->pdfIconPath !== null) {
+            return $this->pdfIconPath === '' ? null : $this->pdfIconPath;
+        }
+
+        $binary = base64_decode(self::PDF_ICON_BASE64, true);
+        if ($binary === false) {
+            $this->pdfIconPath = '';
+            return null;
+        }
+
+        $path = $this->writeTempFile($binary, 'nf-pdf-icon.png');
+        if (!$path) {
+            $this->pdfIconPath = '';
+            return null;
+        }
+
+        $this->pdfIconPath = $path;
+
+        return $this->pdfIconPath;
+    }
+
+    private function coordinate(int $columnIndex, int $rowIndex): string {
+        return Coordinate::stringFromColumnIndex($columnIndex) . (string) $rowIndex;
+    }
     private static function image_entries_from_value(array $payload): array {
         $urls = [];
 
@@ -787,14 +500,12 @@ class NF_XLSX_Stream_Exporter {
 
         return array_values(array_unique($matches[0]));
     }
-
     private static function fetch_image_bin(string $url): ?array {
         if ($url === '') {
             return null;
         }
 
         $response = self::perform_http_request($url);
-
         if (!$response['body']) {
             return null;
         }
@@ -803,10 +514,19 @@ class NF_XLSX_Stream_Exporter {
         $info = @getimagesizefromstring($body);
 
         if ($info === false) {
-            return null;
+            $localPath = self::url_to_local_path($url);
+            if ($localPath) {
+                $info = @getimagesize($localPath);
+                if ($info === false) {
+                    return null;
+                }
+                $body = (string) file_get_contents($localPath);
+            } else {
+                return null;
+            }
         }
 
-        $mime      = isset($info['mime']) ? $info['mime'] : ($response['content_type'] ?? 'image/png');
+        $mime      = isset($info['mime']) ? (string) $info['mime'] : ($response['content_type'] ?? 'image/png');
         $extension = self::extension_from_mime($mime);
 
         if ($extension === '') {
@@ -832,14 +552,20 @@ class NF_XLSX_Stream_Exporter {
         }
 
         $response = self::perform_http_request($url);
-
-        if (!$response['body']) {
-            return null;
+        if ($response['body']) {
+            return $response['body'];
         }
 
-        return $response['body'];
-    }
+        $localPath = self::url_to_local_path($url);
+        if ($localPath && file_exists($localPath)) {
+            $contents = @file_get_contents($localPath);
+            if ($contents !== false) {
+                return $contents;
+            }
+        }
 
+        return null;
+    }
     private static function perform_http_request(string $url): array {
         $body        = '';
         $contentType = null;
@@ -852,17 +578,13 @@ class NF_XLSX_Stream_Exporter {
                 ],
             ]);
 
-            if (is_wp_error($response)) {
-                return ['body' => '', 'content_type' => null];
+            if (!is_wp_error($response)) {
+                $code = wp_remote_retrieve_response_code($response);
+                if ($code < 400) {
+                    $body        = (string) wp_remote_retrieve_body($response);
+                    $contentType = wp_remote_retrieve_header($response, 'content-type');
+                }
             }
-
-            $code = wp_remote_retrieve_response_code($response);
-            if ($code >= 400) {
-                return ['body' => '', 'content_type' => null];
-            }
-
-            $body        = (string) wp_remote_retrieve_body($response);
-            $contentType = wp_remote_retrieve_header($response, 'content-type');
         } else {
             $context = stream_context_create([
                 'http' => [
@@ -871,13 +593,12 @@ class NF_XLSX_Stream_Exporter {
                 ],
             ]);
 
-            $body = @file_get_contents($url, false, $context);
-
-            if ($body === false) {
-                $body = '';
+            $fetched = @file_get_contents($url, false, $context);
+            if ($fetched !== false) {
+                $body = $fetched;
             }
 
-            if (isset($http_response_header)) {
+            if (isset($http_response_header) && is_array($http_response_header)) {
                 foreach ($http_response_header as $headerLine) {
                     if (stripos($headerLine, 'content-type:') === 0) {
                         $contentType = trim(substr($headerLine, strlen('content-type:')));
@@ -887,12 +608,91 @@ class NF_XLSX_Stream_Exporter {
             }
         }
 
+        if ($body === '') {
+            $local = self::read_local_file($url);
+            if ($local) {
+                $body        = $local['body'];
+                $contentType = $local['content_type'];
+            }
+        }
+
         return [
-            'body'        => $body,
+            'body'         => $body,
             'content_type' => $contentType,
         ];
     }
 
+    private static function read_local_file(string $url): ?array {
+        $path = self::url_to_local_path($url);
+        if (!$path || !file_exists($path)) {
+            return null;
+        }
+
+        $body = @file_get_contents($path);
+        if ($body === false) {
+            return null;
+        }
+
+        $type = null;
+        if (function_exists('wp_check_filetype')) {
+            $typeInfo = wp_check_filetype($path);
+            if (!empty($typeInfo['type'])) {
+                $type = $typeInfo['type'];
+            }
+        }
+
+        if (!$type && function_exists('mime_content_type')) {
+            $type = @mime_content_type($path) ?: null;
+        }
+
+        return [
+            'body'         => $body,
+            'content_type' => $type,
+        ];
+    }
+
+    private static function url_to_local_path(string $url): string {
+        if (!is_string($url) || $url === '') {
+            return '';
+        }
+
+        $url = trim($url);
+        if ($url === '') {
+            return '';
+        }
+
+        $uploads = function_exists('wp_upload_dir') ? wp_upload_dir() : null;
+        if (is_array($uploads) && empty($uploads['error']) && !empty($uploads['baseurl']) && !empty($uploads['basedir'])) {
+            $baseUrl = trailingslashit($uploads['baseurl']);
+            if (stripos($url, $baseUrl) === 0) {
+                $relative = ltrim(substr($url, strlen($baseUrl)), '/');
+                $path     = trailingslashit($uploads['basedir']) . str_replace(['\\', '//'], '/', $relative);
+                if (file_exists($path)) {
+                    return $path;
+                }
+            }
+        }
+
+        $siteUrl = function_exists('site_url') ? trailingslashit(site_url()) : '';
+        if ($siteUrl && stripos($url, $siteUrl) === 0) {
+            $relative = ltrim(substr($url, strlen($siteUrl)), '/');
+            $path     = trailingslashit(ABSPATH) . str_replace(['\\', '//'], '/', $relative);
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        $contentUrl = function_exists('content_url') ? trailingslashit(content_url()) : '';
+        if ($contentUrl && stripos($url, $contentUrl) === 0) {
+            $relative = ltrim(substr($url, strlen($contentUrl)), '/');
+            $path     = trailingslashit(WP_CONTENT_DIR) . str_replace(['\\', '//'], '/', $relative);
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        return '';
+    }
     private static function extension_from_url(string $url): string {
         $path = parse_url($url, PHP_URL_PATH);
 
@@ -900,38 +700,22 @@ class NF_XLSX_Stream_Exporter {
             return '';
         }
 
-        $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-
-        return $extension;
+        return strtolower(pathinfo($path, PATHINFO_EXTENSION));
     }
 
     private static function extension_from_mime(?string $mime): string {
         $mime = is_string($mime) ? strtolower(trim($mime)) : '';
 
         $map = [
-            'image/jpeg' => 'jpg',
-            'image/jpg'  => 'jpg',
-            'image/png'  => 'png',
-            'image/gif'  => 'gif',
-            'image/webp' => 'webp',
+            'image/jpeg'      => 'jpg',
+            'image/jpg'       => 'jpg',
+            'image/png'       => 'png',
+            'image/gif'       => 'gif',
+            'image/webp'      => 'webp',
             'application/pdf' => 'pdf',
         ];
 
         return $map[$mime] ?? '';
-    }
-
-    private static function mime_from_extension(string $extension): string {
-        $map = [
-            'jpg'  => 'image/jpeg',
-            'jpeg' => 'image/jpeg',
-            'png'  => 'image/png',
-            'gif'  => 'image/gif',
-            'pdf'  => 'application/pdf',
-        ];
-
-        $extension = strtolower($extension);
-
-        return $map[$extension] ?? 'application/octet-stream';
     }
 
     private static function is_image_extension(string $extension): bool {
@@ -942,5 +726,26 @@ class NF_XLSX_Stream_Exporter {
 
     private static function is_pdf_extension(string $extension): bool {
         return strtolower($extension) === 'pdf';
+    }
+
+    private static function pixels_to_points(float $pixels): float {
+        return round($pixels * 72 / 96, 2);
+    }
+
+    private static function sanitize_sheet_name(string $name): string {
+        $name = preg_replace('/[\\\\\\/*\[\]\?:]/', ' ', $name);
+        $name = trim((string) $name);
+
+        if ($name === '') {
+            $name = 'Sheet';
+        }
+
+        if (function_exists('mb_substr')) {
+            $name = mb_substr($name, 0, 31, 'UTF-8');
+        } else {
+            $name = substr($name, 0, 31);
+        }
+
+        return $name;
     }
 }
