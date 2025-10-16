@@ -128,10 +128,13 @@ class NF_XLSX_Stream_Exporter {
                 }
 
                 if (!empty($payload['links'])) {
-                    $this->cell($this->submissionsSheet, $columnIndex, $rowIndex)
-                        ->getHyperlink()
-                        ->setUrl($payload['links'][0])
-                        ->setTooltip(__('Open link', 'nf-cpt-xlsx-inline'));
+                    $sanitizedUrl = self::sanitize_hyperlink_url($payload['links'][0]);
+                    if ($sanitizedUrl !== null) {
+                        $this->cell($this->submissionsSheet, $columnIndex, $rowIndex)
+                            ->getHyperlink()
+                            ->setUrl($sanitizedUrl)
+                            ->setTooltip(__('Open link', 'nf-cpt-xlsx-inline'));
+                    }
                 }
 
                 $imageUrls = self::image_entries_from_value($payload);
@@ -253,9 +256,12 @@ class NF_XLSX_Stream_Exporter {
         $drawing->setOffsetX(2);
         $drawing->setOffsetY($offsetY);
 
-        $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
-        $cell->getHyperlink()->setUrl($url);
-        $cell->getHyperlink()->setTooltip(__('Open PDF', 'nf-cpt-xlsx-inline'));
+        $sanitizedUrl = self::sanitize_hyperlink_url($url);
+        if ($sanitizedUrl !== null) {
+            $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
+            $cell->getHyperlink()->setUrl($sanitizedUrl);
+            $cell->getHyperlink()->setTooltip(__('Open PDF', 'nf-cpt-xlsx-inline'));
+        }
 
         $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, true);
     }
@@ -317,10 +323,11 @@ class NF_XLSX_Stream_Exporter {
         $this->setCellValueExplicit($sheet, 2, $this->attachmentsRow, (string) $columnLabel);
         $this->setCellValueExplicit($sheet, 3, $this->attachmentsRow, (string) $url);
 
-        if ($url !== '') {
+        $sanitizedUrl = self::sanitize_hyperlink_url($url);
+        if ($sanitizedUrl !== null) {
             $this->cell($sheet, 3, $this->attachmentsRow)
                 ->getHyperlink()
-                ->setUrl($url)
+                ->setUrl($sanitizedUrl)
                 ->setTooltip(__('Open original file', 'nf-cpt-xlsx-inline'));
         }
 
@@ -800,5 +807,39 @@ class NF_XLSX_Stream_Exporter {
         }
 
         return $name;
+    }
+
+    /**
+     * Validates and sanitizes a URL for use as an Excel hyperlink.
+     * Excel has strict requirements: max 255 chars, valid format, no control characters.
+     *
+     * @param string $url The URL to validate
+     * @return string|null The sanitized URL or null if invalid
+     */
+    private static function sanitize_hyperlink_url(string $url): ?string {
+        $url = trim($url);
+
+        // Empty check
+        if ($url === '') {
+            return null;
+        }
+
+        // Length check - Excel hyperlinks are limited to 255 characters
+        if (strlen($url) > 255) {
+            return null;
+        }
+
+        // Remove control characters that can corrupt Excel files
+        $url = preg_replace('/[\x00-\x1F\x7F]/', '', $url);
+
+        // Basic URL format validation
+        if (!preg_match('/^https?:\/\/.+/i', $url)) {
+            return null;
+        }
+
+        // URL encode spaces and other problematic characters
+        $url = str_replace(' ', '%20', $url);
+
+        return $url;
     }
 }
