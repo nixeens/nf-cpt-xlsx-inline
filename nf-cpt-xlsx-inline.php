@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: NF CPT → XLSX Inline Export
+ * Plugin Name: NF Export - codex
  * Description: Export Ninja Forms submissions to Excel (.xlsx) with bundled PhpSpreadsheet library.
  * Version: 2.0.0
  * Author: Your Name

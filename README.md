@@ -1,4 +1,4 @@
-# NF CPT → XLSX Inline Export
+# NF Export - codex
 
 This WordPress plugin bundles PhpSpreadsheet so editors can export any public post type directly from the admin without installing Composer on the server.
 
