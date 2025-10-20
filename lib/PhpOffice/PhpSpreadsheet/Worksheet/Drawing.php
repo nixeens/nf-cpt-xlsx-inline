@@ -230,7 +230,11 @@ class Drawing extends BaseDrawing
             throw new PhpSpreadsheetException('Unsupported image type in comment background. Supported types: PNG, JPEG, BMP, GIF.');
         }
 
-        $result = image_type_to_extension(self::IMAGE_TYPES_CONVERTION_MAP[$this->type], $includeDot);
+        $imageType = self::IMAGE_TYPES_CONVERTION_MAP[$this->type];
+        $result = image_type_to_extension($imageType, $includeDot);
+        if ($imageType === IMAGETYPE_JPEG) {
+            $result = $includeDot ? '.jpg' : 'jpg';
+        }
 
         return "$result";
     }
