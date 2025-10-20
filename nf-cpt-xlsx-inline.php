@@ -1,11 +1,13 @@
 <?php
 /**
- * Plugin Name: NF Export - codex
- * Description: Export Ninja Forms submissions to Excel (.xlsx) with bundled PhpSpreadsheet library.
+ * Plugin Name: NF Export - Codex V2
+ * Description: Experimental branch of NF Export plugin with isolated namespace.
  * Version: 2.0.0
  * Author: Your Name
  * License: GPL2
  */
+
+namespace CodexV2;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -75,30 +77,30 @@ function nf_xlsx_register_local_autoloaders() {
 
     $registered = true;
 }
-add_action('plugins_loaded', 'nf_xlsx_register_local_autoloaders', 1);
+\add_action('plugins_loaded', __NAMESPACE__ . '\nf_xlsx_register_local_autoloaders', 1);
 
 require_once __DIR__ . '/class-nf-xlsx-stream-exporter.php';
 
-register_activation_hook(__FILE__, 'nf_xlsx_generate_activation_sample');
+\register_activation_hook(__FILE__, __NAMESPACE__ . '\nf_xlsx_generate_activation_sample');
 
 // -----------------------------------------------------------------------------
 // Admin UI registration.
 // -----------------------------------------------------------------------------
-add_action('admin_menu', static function () {
-    add_menu_page(
+\add_action('admin_menu', static function () {
+    \add_menu_page(
         __('NF Codex Test', 'nf-cpt-xlsx-inline'),
         __('NF Codex Test', 'nf-cpt-xlsx-inline'),
         'manage_options',
         'nf-cpt-xlsx-inline',
-        'nf_xlsx_render_admin_page',
+        __NAMESPACE__ . '\nf_xlsx_render_admin_page',
         'dashicons-media-spreadsheet',
         58
     );
 });
 
-add_action('admin_post_nf_xlsx_export', 'nf_xlsx_handle_export');
+\add_action('admin_post_nf_xlsx_export', __NAMESPACE__ . '\nf_xlsx_handle_export');
 
-add_action('admin_notices', static function () {
+\add_action('admin_notices', static function () {
     if (!isset($_GET['page']) || $_GET['page'] !== 'nf-cpt-xlsx-inline') {
         return;
     }
