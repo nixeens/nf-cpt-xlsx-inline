@@ -86,8 +86,8 @@ register_activation_hook(__FILE__, 'nf_xlsx_generate_activation_sample');
 // -----------------------------------------------------------------------------
 add_action('admin_menu', static function () {
     add_menu_page(
-        __('NF Submissions Export', 'nf-cpt-xlsx-inline'),
-        __('NF Submissions Export', 'nf-cpt-xlsx-inline'),
+        __('NF Codex Test', 'nf-cpt-xlsx-inline'),
+        __('NF Codex Test', 'nf-cpt-xlsx-inline'),
         'manage_options',
         'nf-cpt-xlsx-inline',
         'nf_xlsx_render_admin_page',
@@ -184,7 +184,7 @@ function nf_xlsx_render_admin_page() {
     $previewSubmissions = $selected_id ? nf_xlsx_get_submissions($selected_id, 5) : [];
     ?>
     <div class="wrap">
-        <h1><?php esc_html_e('NF Submissions Export', 'nf-cpt-xlsx-inline'); ?></h1>
+        <h1><?php esc_html_e('NF Codex Test', 'nf-cpt-xlsx-inline'); ?></h1>
         <p><?php esc_html_e('Download an .xlsx file containing all submissions for the selected Ninja Form.', 'nf-cpt-xlsx-inline'); ?></p>
 
         <?php if (empty($forms)) : ?>
