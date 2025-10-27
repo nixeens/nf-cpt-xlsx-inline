@@ -2,396 +2,438 @@
 
 namespace CodexV2;
 
-use PhpOffice\PhpSpreadsheet\Cell\Cell;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
 use PhpOffice\PhpSpreadsheet\IOFactory;
+use PhpOffice\PhpSpreadsheet\RichText\RichText;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
-use PhpOffice\PhpSpreadsheet\Style\Style;
 use PhpOffice\PhpSpreadsheet\Worksheet\Drawing;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use RuntimeException;
+use ZipArchive;
 
-class NF_XLSX_Stream_Exporter {
+class NF_XLSX_Stream_Exporter
+{
     private const PDF_ICON_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAVklEQVR42u3PQQ0AMAzEsOOPrCDGpeOwSe3HUQg4'
         . 'lfzc2wUAAAAAAAAAAAAAAAAAAOANcGp3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgMkv31CxpiuECMgAAAAASUVORK5CYII=';
-    private array $form;
-    private array $columns;
-    private array $submissions;
+
+    private array $headers;
+    private array $rows;
+    private array $options;
 
     private Spreadsheet $spreadsheet;
-    private Worksheet $submissionsSheet;
+    private Worksheet $dataSheet;
     private ?Worksheet $attachmentsSheet = null;
-    private int $attachmentsRow = 1;
 
-    private array $imageCache = [];
-    private array $pdfCache = [];
-    private array $tempFiles = [];
+    private int $attachmentsSheetRow = 1;
+    private array $rowOffsets = [];
     private array $rowHeights = [];
-    private array $cellOffsets = [];
+    private array $attachments = [];
+    private array $tempFiles = [];
 
-    private int $imageCounter = 0;
-    private int $pdfCounter = 0;
-
-    private string $submissionsSheetName;
-    private string $attachmentsSheetName;
+    private int $imageIndex = 0;
+    private int $pdfIndex = 0;
 
     private ?string $pdfIconPath = null;
-    public function __construct(array $form, array $columns, array $submissions) {
-        $this->form        = $form;
-        $this->columns     = array_values($columns);
-        $this->submissions = $submissions;
 
-        $this->submissionsSheetName = self::sanitize_sheet_name(__('Submissions', 'nf-cpt-xlsx-inline'));
-        $this->attachmentsSheetName = self::sanitize_sheet_name(__('Attachments', 'nf-cpt-xlsx-inline'));
+    private int $imageColumnIndex;
+    private int $signatureColumnIndex;
+    private int $pdfColumnIndex;
 
-        $this->initialiseSheets();
+    private const IMAGE_MAX_WIDTH = 170.0;
+    private const IMAGE_MAX_HEIGHT = 220.0;
+
+    public function __construct(array $headers, array $rows, array $options = [])
+    {
+        $this->headers = $headers;
+        $this->rows = $rows;
+        $this->options = array_merge(
+            [
+                'include_attachments' => true,
+                'treat_signatures_separately' => true,
+            ],
+            $options
+        );
+
+        $this->buildWorkbook();
     }
 
-    public function __destruct() {
+    public function __destruct()
+    {
         $this->cleanupTempFiles();
     }
 
-    public function save(string $filepath): void {
-        $this->spreadsheet->setActiveSheetIndex(0);
-        $writer = IOFactory::createWriter($this->spreadsheet, 'Xlsx');
+    public function exportZip(string $zipPath): array
+    {
+        $xlsxTemp = $this->createTempFile('export.xlsx');
+        $this->saveSpreadsheet($xlsxTemp);
 
-        if ($writer instanceof Xlsx) {
-            $writer->setPreCalculateFormulas(false);
+        $zip = new ZipArchive();
+        if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
+            throw new RuntimeException('Unable to create ZIP archive at ' . $zipPath);
         }
 
-        $writer->save($filepath);
-        $this->spreadsheet->disconnectWorksheets();
-        $this->cleanupTempFiles();
+        if (!$zip->addFile($xlsxTemp, 'export.xlsx')) {
+            throw new RuntimeException('Unable to add workbook to archive.');
+        }
+
+        if (!empty($this->options['include_attachments'])) {
+            foreach ($this->attachments as $attachment) {
+                $path = $attachment['path'] ?? '';
+                if ($path && file_exists($path)) {
+                    $zip->addFile($path, $attachment['zip_name']);
+                }
+            }
+        }
+
+        $manifest = $this->createManifest();
+        $json = function_exists('wp_json_encode')
+            ? wp_json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+            : json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+        $zip->addFromString('manifest.json', (string) $json);
+        $zip->close();
+
+        return $manifest;
     }
-    private function initialiseSheets(): void {
+
+    private function buildWorkbook(): void
+    {
         $this->spreadsheet = new Spreadsheet();
         $this->configureTheme();
         $this->spreadsheet->getDefaultStyle()->getFont()->setName('Calibri')->setSize(11);
 
-        $this->submissionsSheet = $this->spreadsheet->getActiveSheet();
-        $this->submissionsSheet->setTitle($this->submissionsSheetName);
+        $this->dataSheet = $this->spreadsheet->getActiveSheet();
+        $this->dataSheet->setTitle('Data');
 
-        $this->addSubmissionHeaders();
+        $dataColumns = count($this->headers);
+        $this->imageColumnIndex = $dataColumns + 1;
+        $this->signatureColumnIndex = $dataColumns + 2;
+        $this->pdfColumnIndex = $dataColumns + 3;
 
-        if (empty($this->submissions)) {
-            $this->addNoSubmissionsRow();
-        } else {
-            $this->populateSubmissions();
-        }
+        $this->addHeaders();
+        $this->addRows();
 
-        $this->submissionsSheet->freezePane('A2');
+        $this->dataSheet->freezePane('A2');
     }
-    private function addSubmissionHeaders(): void {
-        foreach ($this->columns as $column) {
-            $columnIndex = (int) $column['index'];
-            $headerText  = (string) $column['header'];
 
-            $cell = $this->cell($this->submissionsSheet, $columnIndex, 1);
-            $cell->setValueExplicit($headerText, DataType::TYPE_STRING);
-
-            $style = $this->style($this->submissionsSheet, $columnIndex, 1);
+    private function addHeaders(): void
+    {
+        $columnIndex = 1;
+        foreach ($this->headers as $header) {
+            $label = isset($header['label']) ? (string) $header['label'] : '';
+            $this->setCellValue($this->dataSheet, $columnIndex, 1, $label);
+            $style = $this->dataSheet->getStyle(Coordinate::stringFromColumnIndex($columnIndex) . '1');
             $style->getFont()->setBold(true);
             $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
             $style->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
             $style->getAlignment()->setWrapText(true);
+            $this->dataSheet->getColumnDimensionByColumn($columnIndex)->setAutoSize(true);
+            ++$columnIndex;
+        }
 
-            $this->submissionsSheet->getColumnDimensionByColumn($columnIndex)->setAutoSize(true);
+        $this->setAttachmentHeader($this->imageColumnIndex, __('Images', 'nf-cpt-xlsx-inline'));
+        $this->setAttachmentHeader($this->signatureColumnIndex, __('Signatures', 'nf-cpt-xlsx-inline'));
+        $this->setAttachmentHeader($this->pdfColumnIndex, __('PDFs', 'nf-cpt-xlsx-inline'));
+    }
+
+    private function setAttachmentHeader(int $columnIndex, string $label): void
+    {
+        $this->setCellValue($this->dataSheet, $columnIndex, 1, $label);
+        $style = $this->dataSheet->getStyle(Coordinate::stringFromColumnIndex($columnIndex) . '1');
+        $style->getFont()->setBold(true);
+        $style->getAlignment()->setWrapText(true);
+        $style->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
+        $this->dataSheet->getColumnDimensionByColumn($columnIndex)->setWidth(32.0);
+    }
+
+    private function addRows(): void
+    {
+        $rowNumber = 2;
+        foreach ($this->rows as $row) {
+            $this->addRow($row, $rowNumber);
+            ++$rowNumber;
         }
     }
 
-    private function addNoSubmissionsRow(): void {
-        $message = __('No submissions available for this form.', 'nf-cpt-xlsx-inline');
-        $cell    = $this->cell($this->submissionsSheet, 1, 2);
-        $cell->setValueExplicit($message, DataType::TYPE_STRING);
-        $this->submissionsSheet->getStyle('A2')->getAlignment()->setWrapText(true);
-        $this->ensureRowHeight(2, 22.0);
-    }
-    private function populateSubmissions(): void {
-        $rowIndex = 2;
-
-        foreach ($this->submissions as $submission) {
-            foreach ($this->columns as $column) {
-                $columnIndex = (int) $column['index'];
-
-                if ($column['field'] === null) {
-                    $dateText = nf_xlsx_format_date($submission['sub_date'] ?? '');
-                    if ($dateText !== '') {
-                        $this->writeCellText($columnIndex, $rowIndex, $dateText);
-                    }
-                    continue;
-                }
-
-                $payload = nf_xlsx_extract_submission_field_payload($submission, $column['field']);
-
-                if ($payload['text'] !== '') {
-                    $this->writeCellText($columnIndex, $rowIndex, (string) $payload['text']);
-                }
-
-                if (!empty($payload['links'])) {
-                    $this->cell($this->submissionsSheet, $columnIndex, $rowIndex)
-                        ->getHyperlink()
-                        ->setUrl($payload['links'][0])
-                        ->setTooltip(__('Open link', 'nf-cpt-xlsx-inline'));
-                }
-
-                $imageUrls = self::image_entries_from_value($payload);
-                if ($imageUrls) {
-                    foreach ($imageUrls as $imageUrl) {
-                        $this->addImage($imageUrl, $rowIndex, $columnIndex);
-                    }
-                }
-
-                $pdfUrls = self::pdf_entries_from_value($payload);
-                if ($pdfUrls) {
-                    foreach ($pdfUrls as $pdfUrl) {
-                        $this->addPdf($pdfUrl, $rowIndex, $column);
-                    }
-                }
+    private function addRow(array $row, int $rowNumber): void
+    {
+        foreach ($this->headers as $index => $header) {
+            $key = $header['key'] ?? '';
+            $value = '';
+            if ($key !== '' && isset($row['values'][$key])) {
+                $value = (string) $row['values'][$key];
             }
 
-            ++$rowIndex;
-        }
-    }
-    private function writeCellText(int $columnIndex, int $rowIndex, string $value): void {
-        $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
-        $cell->setValueExplicit($value, DataType::TYPE_STRING);
-
-        $style = $this->style($this->submissionsSheet, $columnIndex, $rowIndex);
-        $style->getAlignment()->setWrapText(true);
-        $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
-
-        $this->ensureRowHeight($rowIndex, 22.0);
-    }
-    private function addImage(string $url, int $rowIndex, int $columnIndex): void {
-        $cacheKey = md5($url);
-
-        if (!array_key_exists($cacheKey, $this->imageCache)) {
-            $this->imageCache[$cacheKey] = self::fetch_image_bin($url);
+            $this->setCellValue($this->dataSheet, $index + 1, $rowNumber, $value);
+            $style = $this->dataSheet->getStyle(Coordinate::stringFromColumnIndex($index + 1) . $rowNumber);
+            $style->getAlignment()->setWrapText(true);
+            $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
         }
 
-        $imageData = $this->imageCache[$cacheKey];
-        if (!$imageData) {
-            $this->fallbackLink($url, $columnIndex, $rowIndex);
+        $this->ensureRowHeight($rowNumber, 24.0);
+
+        if (!empty($row['attachments']) && is_array($row['attachments'])) {
+            foreach ($row['attachments'] as $attachment) {
+                $this->attachments[] = $attachment;
+                $this->processAttachment($attachment, $rowNumber);
+            }
+        }
+    }
+
+    private function processAttachment(array $attachment, int $rowNumber): void
+    {
+        $type = $attachment['type'] ?? 'other';
+
+        if ($type === 'image') {
+            $isSignature = !empty($attachment['is_signature']) && !empty($this->options['treat_signatures_separately']);
+            $columnIndex = $isSignature ? $this->signatureColumnIndex : $this->imageColumnIndex;
+            $this->embedImage($attachment, $rowNumber, $columnIndex);
+        } elseif ($type === 'pdf') {
+            $this->embedPdf($attachment, $rowNumber);
+        } else {
+            $this->addAttachmentSheetRow($attachment);
+        }
+    }
+
+    private function embedImage(array $attachment, int $rowNumber, int $columnIndex): void
+    {
+        $resolved = $this->resolveImagePath($attachment);
+        if ($resolved === null) {
             return;
         }
 
-        ++$this->imageCounter;
+        $path = $resolved['path'];
+        $width = $resolved['width'];
+        $height = $resolved['height'];
 
-        $maxWidth  = 240.0;
-        $maxHeight = 220.0;
-        $widthPx   = (float) ($imageData['width'] ?? 120.0);
-        $heightPx  = (float) ($imageData['height'] ?? 120.0);
+        $scale = min(1.0, self::IMAGE_MAX_WIDTH / max(1.0, $width), self::IMAGE_MAX_HEIGHT / max(1.0, $height));
+        $targetWidth = (int) round(max(20.0, $width * $scale));
+        $targetHeight = (int) round(max(20.0, $height * $scale));
 
-        $scale = min(1.0, $maxWidth / max(1.0, $widthPx), $maxHeight / max(1.0, $heightPx));
-        $targetWidth  = max(20.0, $widthPx * $scale);
-        $targetHeight = max(20.0, $heightPx * $scale);
-
-        $tempPath = $this->writeTempFile(
-            $imageData['data'],
-            'nf-image-' . $this->imageCounter . '.' . $imageData['extension']
-        );
-
-        if (!$tempPath) {
-            $this->fallbackLink($url, $columnIndex, $rowIndex);
-            return;
-        }
+        $offsetY = $this->reserveOffset($rowNumber, $columnIndex, (float) $targetHeight);
 
         $drawing = new Drawing();
-        $drawing->setName(sprintf(__('Image %d', 'nf-cpt-xlsx-inline'), $this->imageCounter));
-        $drawing->setDescription($url);
-        $drawing->setPath($tempPath);
-        $drawing->setCoordinates($this->coordinate($columnIndex, $rowIndex));
-        $drawing->setResizeProportional(true);
-        $drawing->setWidth((int) round($targetWidth));
-        $drawing->setWorksheet($this->submissionsSheet);
-
-        $offsetY = $this->reserveCellOffset($rowIndex, $columnIndex, $targetHeight);
+        $drawing->setName(sprintf(__('Image %d', 'nf-cpt-xlsx-inline'), ++$this->imageIndex));
+        $drawing->setDescription($attachment['source_url'] ?? '');
+        $drawing->setPath($path);
+        $drawing->setCoordinates(Coordinate::stringFromColumnIndex($columnIndex) . $rowNumber);
+        $drawing->setResizeProportional(false);
+        $drawing->setWidth($targetWidth);
+        $drawing->setHeight($targetHeight);
         $drawing->setOffsetX(4);
         $drawing->setOffsetY($offsetY);
+        $drawing->setWorksheet($this->dataSheet);
+
+        $this->ensureRowHeight($rowNumber, $offsetY + $targetHeight + 10.0);
     }
-    private function addPdf(string $url, int $rowIndex, array $column): void {
-        $columnIndex = (int) $column['index'];
-        $cacheKey    = md5($url);
 
-        if (!array_key_exists($cacheKey, $this->pdfCache)) {
-            $this->pdfCache[$cacheKey] = self::fetch_pdf_bin($url);
-        }
-
-        $pdfBinary = $this->pdfCache[$cacheKey];
-        if ($pdfBinary === null) {
-            $this->fallbackLink($url, $columnIndex, $rowIndex);
-            $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, false);
-            return;
-        }
-
-        ++$this->pdfCounter;
-
-        $pdfTemp = $this->writeTempFile($pdfBinary, 'nf-pdf-' . $this->pdfCounter . '.pdf');
-        if (!$pdfTemp) {
-            $this->fallbackLink($url, $columnIndex, $rowIndex);
-            $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, false);
-            return;
-        }
-
+    private function embedPdf(array $attachment, int $rowNumber): void
+    {
         $iconPath = $this->getPdfIconPath();
         if (!$iconPath) {
-            $this->fallbackLink($url, $columnIndex, $rowIndex);
-            $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, true);
             return;
         }
+
+        $columnIndex = $this->pdfColumnIndex;
+        $offsetY = $this->reserveOffset($rowNumber, $columnIndex, 22.0);
 
         $drawing = new Drawing();
-        $drawing->setName(sprintf(__('PDF %d', 'nf-cpt-xlsx-inline'), $this->pdfCounter));
-        $drawing->setDescription($url);
+        $drawing->setName(sprintf(__('PDF %d', 'nf-cpt-xlsx-inline'), ++$this->pdfIndex));
+        $drawing->setDescription($attachment['source_url'] ?? '');
         $drawing->setPath($iconPath);
-        $drawing->setCoordinates($this->coordinate($columnIndex, $rowIndex));
-        $drawing->setResizeProportional(true);
+        $drawing->setCoordinates(Coordinate::stringFromColumnIndex($columnIndex) . $rowNumber);
         $drawing->setHeight(22);
-        $drawing->setWorksheet($this->submissionsSheet);
-
-        $offsetY = $this->reserveCellOffset($rowIndex, $columnIndex, 22.0);
-        $drawing->setOffsetX(2);
+        $drawing->setOffsetX(4);
         $drawing->setOffsetY($offsetY);
+        $drawing->setWorksheet($this->dataSheet);
 
-        $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
-        $cell->getHyperlink()->setUrl($url);
-        $cell->getHyperlink()->setTooltip(__('Open PDF', 'nf-cpt-xlsx-inline'));
+        $coordinate = Coordinate::stringFromColumnIndex($columnIndex) . $rowNumber;
+        $cell = $this->dataSheet->getCell($coordinate);
+        $label = $attachment['original_filename'] ?? $attachment['zip_name'] ?? __('Document', 'nf-cpt-xlsx-inline');
+        $cell->setValueExplicit((string) $label, DataType::TYPE_STRING);
+        $cell->getStyle()->getAlignment()->setWrapText(true);
+        $cell->getStyle()->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
 
-        $this->addAttachmentRow($rowIndex, $column['header'] ?? '', $url, true);
-    }
-    private function fallbackLink(string $url, int $columnIndex, int $rowIndex): void {
-        if ($url === '') {
-            return;
+        if (!empty($attachment['source_url'])) {
+            $cell->getHyperlink()->setUrl($attachment['source_url']);
         }
 
-        $cell = $this->cell($this->submissionsSheet, $columnIndex, $rowIndex);
-        $existing = (string) $cell->getValue();
-
-        if ($existing !== '') {
-            if (strpos($existing, $url) === false) {
-                $cell->setValueExplicit($existing . "\n" . $url, DataType::TYPE_STRING);
-            }
-        } else {
-            $cell->setValueExplicit($url, DataType::TYPE_STRING);
+        if (!empty($attachment['zip_name'])) {
+            $richText = new RichText();
+            $richText->createText(sprintf(__('Linked file: %s', 'nf-cpt-xlsx-inline'), $attachment['zip_name']));
+            $cell->getComment()->setText($richText);
+            $cell->getComment()->setAuthor('NF Export');
         }
 
-        $style = $this->style($this->submissionsSheet, $columnIndex, $rowIndex);
-        $style->getAlignment()->setWrapText(true);
-
-        $this->ensureRowHeight($rowIndex, 24.0);
-    }
-    private function ensureAttachmentsSheet(): Worksheet {
-        if ($this->attachmentsSheet instanceof Worksheet) {
-            return $this->attachmentsSheet;
-        }
-
-        $this->attachmentsSheet = new Worksheet($this->spreadsheet, $this->attachmentsSheetName);
-        $this->spreadsheet->addSheet($this->attachmentsSheet);
-        $this->setCellValueExplicit($this->attachmentsSheet, 1, 1, __('Row', 'nf-cpt-xlsx-inline'));
-        $this->setCellValueExplicit($this->attachmentsSheet, 2, 1, __('Column', 'nf-cpt-xlsx-inline'));
-        $this->setCellValueExplicit($this->attachmentsSheet, 3, 1, __('Original URL', 'nf-cpt-xlsx-inline'));
-        $this->setCellValueExplicit($this->attachmentsSheet, 4, 1, __('Status', 'nf-cpt-xlsx-inline'));
-
-        for ($col = 1; $col <= 4; $col++) {
-            $style = $this->style($this->attachmentsSheet, $col, 1);
-            $style->getFont()->setBold(true);
-            $style->getAlignment()->setWrapText(true);
-            $style->getAlignment()->setHorizontal(Alignment::HORIZONTAL_LEFT);
-        }
-
-        $this->attachmentsSheet->getColumnDimensionByColumn(1)->setWidth(12.0);
-        $this->attachmentsSheet->getColumnDimensionByColumn(2)->setWidth(28.0);
-        $this->attachmentsSheet->getColumnDimensionByColumn(3)->setWidth(60.0);
-        $this->attachmentsSheet->getColumnDimensionByColumn(4)->setWidth(26.0);
-
-        $this->attachmentsRow = 1;
-
-        return $this->attachmentsSheet;
+        $this->ensureRowHeight($rowNumber, $offsetY + 32.0);
     }
 
-    private function addAttachmentRow(int $sourceRow, string $columnLabel, string $url, bool $downloaded): void {
+    private function addAttachmentSheetRow(array $attachment): void
+    {
         $sheet = $this->ensureAttachmentsSheet();
-        ++$this->attachmentsRow;
+        ++$this->attachmentsSheetRow;
 
-        $this->setCellValueExplicit($sheet, 1, $this->attachmentsRow, (string) $sourceRow);
-        $this->setCellValueExplicit($sheet, 2, $this->attachmentsRow, (string) $columnLabel);
-        $this->setCellValueExplicit($sheet, 3, $this->attachmentsRow, (string) $url);
+        $this->setCellValue($sheet, 1, $this->attachmentsSheetRow, (string) ($attachment['zip_name'] ?? ''));
+        $this->setCellValue($sheet, 2, $this->attachmentsSheetRow, (string) ($attachment['original_filename'] ?? ''));
+        $this->setCellValue($sheet, 3, $this->attachmentsSheetRow, (string) ($attachment['mime'] ?? ''));
+        $this->setCellValue($sheet, 4, $this->attachmentsSheetRow, (string) ($attachment['source_url'] ?? ''));
+        $this->setCellValue($sheet, 5, $this->attachmentsSheetRow, (string) ($attachment['post_id'] ?? ''));
 
-        if ($url !== '') {
-            $this->cell($sheet, 3, $this->attachmentsRow)
-                ->getHyperlink()
-                ->setUrl($url)
-                ->setTooltip(__('Open original file', 'nf-cpt-xlsx-inline'));
+        if (!empty($attachment['source_url'])) {
+            $coordinate = Coordinate::stringFromColumnIndex(4) . $this->attachmentsSheetRow;
+            $sheet->getCell($coordinate)->getHyperlink()->setUrl($attachment['source_url']);
         }
 
-        $status = $downloaded
-            ? __('Icon linked', 'nf-cpt-xlsx-inline')
-            : __('Download failed', 'nf-cpt-xlsx-inline');
-
-        $this->setCellValueExplicit($sheet, 4, $this->attachmentsRow, $status);
-
-        for ($col = 1; $col <= 4; $col++) {
-            $style = $this->style($sheet, $col, $this->attachmentsRow);
+        for ($col = 1; $col <= 5; ++$col) {
+            $style = $sheet->getStyle(Coordinate::stringFromColumnIndex($col) . $this->attachmentsSheetRow);
             $style->getAlignment()->setWrapText(true);
             $style->getAlignment()->setVertical(Alignment::VERTICAL_TOP);
         }
     }
-    private function ensureRowHeight(int $rowIndex, float $heightPx): void {
-        $heightPx = max($heightPx, 20.0);
-        $current  = $this->rowHeights[$rowIndex] ?? 0.0;
 
-        if ($heightPx > $current) {
-            $this->rowHeights[$rowIndex] = $heightPx;
-            $points = self::pixels_to_points($heightPx + 4.0);
-            $this->submissionsSheet->getRowDimension($rowIndex)->setRowHeight($points);
+    private function ensureAttachmentsSheet(): Worksheet
+    {
+        if ($this->attachmentsSheet instanceof Worksheet) {
+            return $this->attachmentsSheet;
         }
+
+        $this->attachmentsSheet = new Worksheet($this->spreadsheet, 'Attachments');
+        $this->spreadsheet->addSheet($this->attachmentsSheet);
+
+        $headers = [
+            __('ZIP Name', 'nf-cpt-xlsx-inline'),
+            __('Original Filename', 'nf-cpt-xlsx-inline'),
+            __('MIME', 'nf-cpt-xlsx-inline'),
+            __('Source URL', 'nf-cpt-xlsx-inline'),
+            __('Post ID', 'nf-cpt-xlsx-inline'),
+        ];
+
+        foreach ($headers as $index => $label) {
+            $this->setCellValue($this->attachmentsSheet, $index + 1, 1, $label);
+            $style = $this->attachmentsSheet->getStyle(Coordinate::stringFromColumnIndex($index + 1) . '1');
+            $style->getFont()->setBold(true);
+            $style->getAlignment()->setWrapText(true);
+            $style->getAlignment()->setVertical(Alignment::VERTICAL_CENTER);
+        }
+
+        $this->attachmentsSheet->getColumnDimensionByColumn(1)->setWidth(24.0);
+        $this->attachmentsSheet->getColumnDimensionByColumn(2)->setWidth(36.0);
+        $this->attachmentsSheet->getColumnDimensionByColumn(3)->setWidth(20.0);
+        $this->attachmentsSheet->getColumnDimensionByColumn(4)->setWidth(50.0);
+        $this->attachmentsSheet->getColumnDimensionByColumn(5)->setWidth(12.0);
+
+        $this->attachmentsSheetRow = 1;
+
+        return $this->attachmentsSheet;
     }
 
-    private function reserveCellOffset(int $rowIndex, int $columnIndex, float $heightPx): int {
-        $key   = $rowIndex . ':' . $columnIndex;
-        $state = $this->cellOffsets[$key] ?? ['next' => 2, 'total' => 0];
+    private function reserveOffset(int $rowNumber, int $columnIndex, float $height): int
+    {
+        $key = $rowNumber . ':' . $columnIndex;
+        $state = $this->rowOffsets[$key] ?? ['next' => 2];
 
         $offset = (int) $state['next'];
-        $state['next']  = $offset + (int) ceil($heightPx) + 6;
-        $state['total'] = max($state['total'], $offset + (int) ceil($heightPx));
-        $this->cellOffsets[$key] = $state;
-
-        $this->ensureRowHeight($rowIndex, (float) $state['total'] + 8.0);
+        $state['next'] = $offset + (int) ceil($height) + 8;
+        $this->rowOffsets[$key] = $state;
 
         return $offset;
     }
-    private function writeTempFile(string $binary, string $filename): ?string {
-        if ($binary === '') {
+
+    private function ensureRowHeight(int $rowNumber, float $heightPx): void
+    {
+        $heightPx = max($heightPx, 20.0);
+        $current = $this->rowHeights[$rowNumber] ?? 0.0;
+
+        if ($heightPx > $current) {
+            $this->rowHeights[$rowNumber] = $heightPx;
+            $points = $heightPx * 72 / 96;
+            $this->dataSheet->getRowDimension($rowNumber)->setRowHeight($points);
+        }
+    }
+
+    private function resolveImagePath(array $attachment): ?array
+    {
+        $path = $attachment['path'] ?? '';
+        if (!$path || !file_exists($path)) {
             return null;
         }
 
-        $tempPath = '';
-
-        if (function_exists('wp_tempnam')) {
-            $tempPath = wp_tempnam($filename);
-        }
-
-        if (!$tempPath) {
-            $tempPath = tempnam($this->tempDirectory(), 'nfx');
-            if ($tempPath && $filename) {
-                $extension = pathinfo($filename, PATHINFO_EXTENSION);
-                if ($extension) {
-                    $newPath = $tempPath . '.' . $extension;
-                    if (@rename($tempPath, $newPath)) {
-                        $tempPath = $newPath;
-                    }
-                }
+        $info = @getimagesize($path);
+        if ($info && max($info[0], $info[1]) > 2000) {
+            $scaled = $this->createScaledImage($path);
+            if ($scaled !== null) {
+                $path = $scaled;
+                $info = @getimagesize($path);
             }
         }
 
-        if (!$tempPath) {
+        if (!$info) {
+            return [
+                'path'  => $path,
+                'width' => self::IMAGE_MAX_WIDTH,
+                'height'=> self::IMAGE_MAX_HEIGHT,
+            ];
+        }
+
+        return [
+            'path'  => $path,
+            'width' => (float) $info[0],
+            'height'=> (float) $info[1],
+        ];
+    }
+
+    private function createScaledImage(string $path): ?string
+    {
+        if (!function_exists('wp_get_image_editor')) {
             return null;
         }
 
-        if (file_put_contents($tempPath, $binary) === false) {
+        $editor = wp_get_image_editor($path);
+        if (is_wp_error($editor)) {
             return null;
+        }
+
+        $editor->resize(2000, 2000, false);
+
+        $temp = $this->createTempFile(basename($path));
+        $result = $editor->save($temp);
+        if (is_wp_error($result)) {
+            return null;
+        }
+
+        return $result['path'] ?? $temp;
+    }
+
+    private function setCellValue(Worksheet $sheet, int $columnIndex, int $rowIndex, string $value): void
+    {
+        $sheet->setCellValueExplicit(
+            Coordinate::stringFromColumnIndex($columnIndex) . $rowIndex,
+            $value,
+            DataType::TYPE_STRING
+        );
+    }
+
+    private function createTempFile(string $filename): string
+    {
+        $extension = pathinfo($filename, PATHINFO_EXTENSION);
+        $baseName = $extension ? substr($filename, 0, -(strlen($extension) + 1)) : $filename;
+        if ($baseName === '') {
+            $baseName = 'nf-export';
+        }
+
+        $tempPath = function_exists('wp_tempnam') ? wp_tempnam($filename) : tempnam($this->tempDirectory(), 'nfx');
+        if ($tempPath === false || $tempPath === '') {
+            throw new RuntimeException('Unable to allocate temporary file.');
+        }
+
+        if ($extension !== '') {
+            $target = $tempPath . '.' . $extension;
+            if (@rename($tempPath, $target)) {
+                $tempPath = $target;
+            }
         }
 
         $this->tempFiles[] = $tempPath;
@@ -399,7 +441,8 @@ class NF_XLSX_Stream_Exporter {
         return $tempPath;
     }
 
-    private function tempDirectory(): string {
+    private function tempDirectory(): string
+    {
         if (function_exists('get_temp_dir')) {
             return get_temp_dir();
         }
@@ -412,18 +455,36 @@ class NF_XLSX_Stream_Exporter {
         return sys_get_temp_dir();
     }
 
-    private function cleanupTempFiles(): void {
+    private function cleanupTempFiles(): void
+    {
         foreach ($this->tempFiles as $path) {
             if ($path && file_exists($path)) {
                 @unlink($path);
             }
         }
+
         $this->tempFiles = [];
     }
 
-    private function getPdfIconPath(): ?string {
+    private function saveSpreadsheet(string $path): void
+    {
+        $writer = IOFactory::createWriter($this->spreadsheet, 'Xlsx');
+        if ($writer instanceof Xlsx) {
+            $writer->setPreCalculateFormulas(false);
+        }
+
+        $writer->save($path);
+        $this->spreadsheet->disconnectWorksheets();
+    }
+
+    private function getPdfIconPath(): ?string
+    {
+        if ($this->pdfIconPath === '') {
+            return null;
+        }
+
         if ($this->pdfIconPath !== null) {
-            return $this->pdfIconPath === '' ? null : $this->pdfIconPath;
+            return $this->pdfIconPath;
         }
 
         $binary = base64_decode(self::PDF_ICON_BASE64, true);
@@ -432,8 +493,8 @@ class NF_XLSX_Stream_Exporter {
             return null;
         }
 
-        $path = $this->writeTempFile($binary, 'nf-pdf-icon.png');
-        if (!$path) {
+        $path = $this->createTempFile('pdf-icon.png');
+        if (file_put_contents($path, $binary) === false) {
             $this->pdfIconPath = '';
             return null;
         }
@@ -443,27 +504,27 @@ class NF_XLSX_Stream_Exporter {
         return $this->pdfIconPath;
     }
 
-    private function coordinate(int $columnIndex, int $rowIndex): string {
-        return Coordinate::stringFromColumnIndex($columnIndex) . (string) $rowIndex;
+    private function createManifest(): array
+    {
+        $manifest = ['attachments' => []];
+
+        foreach ($this->attachments as $attachment) {
+            $manifest['attachments'][] = [
+                'zip_name'          => $attachment['zip_name'] ?? '',
+                'original_filename' => $attachment['original_filename'] ?? '',
+                'mime'              => $attachment['mime'] ?? '',
+                'type'              => $attachment['type'] ?? '',
+                'is_signature'      => !empty($attachment['is_signature']),
+                'source_url'        => $attachment['source_url'] ?? '',
+                'post_id'           => isset($attachment['post_id']) ? (int) $attachment['post_id'] : 0,
+            ];
+        }
+
+        return $manifest;
     }
 
-    private function cell(Worksheet $sheet, int $columnIndex, int $rowIndex): Cell {
-        return $sheet->getCell($this->coordinate($columnIndex, $rowIndex));
-    }
-
-    private function style(Worksheet $sheet, int $columnIndex, int $rowIndex): Style {
-        return $sheet->getStyle($this->coordinate($columnIndex, $rowIndex));
-    }
-
-    private function setCellValueExplicit(Worksheet $sheet, int $columnIndex, int $rowIndex, string $value): void {
-        $sheet->setCellValueExplicit(
-            $this->coordinate($columnIndex, $rowIndex),
-            $value,
-            DataType::TYPE_STRING
-        );
-    }
-
-    private function configureTheme(): void {
+    private function configureTheme(): void
+    {
         $theme = $this->spreadsheet->getTheme();
         $theme->setThemeColorName('Office');
         $theme->setThemeFontName('Office');
@@ -485,322 +546,10 @@ class NF_XLSX_Stream_Exporter {
             'folHlink' => '800080',
         ];
 
-        foreach ($defaultColours as $colourName => $colourValue) {
-            $theme->setThemeColor($colourName, $colourValue);
+        foreach ($defaultColours as $name => $value) {
+            $theme->setThemeColor($name, $value);
         }
 
         $this->spreadsheet->resetThemeFonts();
-    }
-    private static function image_entries_from_value(array $payload): array {
-        $urls = [];
-
-        if (!empty($payload['images'])) {
-            $urls = array_merge($urls, (array) $payload['images']);
-        }
-
-        if (!empty($payload['links'])) {
-            foreach ((array) $payload['links'] as $link) {
-                if (self::is_image_extension(self::extension_from_url($link))) {
-                    $urls[] = $link;
-                }
-            }
-        }
-
-        if (!empty($payload['text'])) {
-            foreach (self::extract_urls_from_text($payload['text']) as $link) {
-                if (self::is_image_extension(self::extension_from_url($link))) {
-                    $urls[] = $link;
-                }
-            }
-        }
-
-        $urls = array_values(array_filter(array_unique($urls)));
-
-        return $urls;
-    }
-
-    private static function pdf_entries_from_value(array $payload): array {
-        $urls = [];
-
-        if (!empty($payload['pdfs'])) {
-            $urls = array_merge($urls, (array) $payload['pdfs']);
-        }
-
-        if (!empty($payload['links'])) {
-            foreach ((array) $payload['links'] as $link) {
-                if (self::is_pdf_extension(self::extension_from_url($link))) {
-                    $urls[] = $link;
-                }
-            }
-        }
-
-        if (!empty($payload['text'])) {
-            foreach (self::extract_urls_from_text($payload['text']) as $link) {
-                if (self::is_pdf_extension(self::extension_from_url($link))) {
-                    $urls[] = $link;
-                }
-            }
-        }
-
-        return array_values(array_filter(array_unique($urls)));
-    }
-
-    private static function extract_urls_from_text(string $text): array {
-        $pattern = '/https?:\/\/[^\s]+/i';
-        preg_match_all($pattern, $text, $matches);
-
-        if (empty($matches[0])) {
-            return [];
-        }
-
-        return array_values(array_unique($matches[0]));
-    }
-    private static function fetch_image_bin(string $url): ?array {
-        if ($url === '') {
-            return null;
-        }
-
-        $response = self::perform_http_request($url);
-        if (!$response['body']) {
-            return null;
-        }
-
-        $body = $response['body'];
-        $info = @getimagesizefromstring($body);
-
-        if ($info === false) {
-            $localPath = self::url_to_local_path($url);
-            if ($localPath) {
-                $info = @getimagesize($localPath);
-                if ($info === false) {
-                    return null;
-                }
-                $body = (string) file_get_contents($localPath);
-            } else {
-                return null;
-            }
-        }
-
-        $mime      = isset($info['mime']) ? (string) $info['mime'] : ($response['content_type'] ?? 'image/png');
-        $extension = self::extension_from_mime($mime);
-
-        if ($extension === '') {
-            $extension = self::extension_from_url($url);
-        }
-
-        if ($extension === '') {
-            $extension = 'png';
-        }
-
-        return [
-            'data'      => $body,
-            'mime'      => $mime,
-            'extension' => $extension,
-            'width'     => isset($info[0]) ? (int) $info[0] : 120,
-            'height'    => isset($info[1]) ? (int) $info[1] : 120,
-        ];
-    }
-
-    private static function fetch_pdf_bin(string $url): ?string {
-        if ($url === '') {
-            return null;
-        }
-
-        $response = self::perform_http_request($url);
-        if ($response['body']) {
-            return $response['body'];
-        }
-
-        $localPath = self::url_to_local_path($url);
-        if ($localPath && file_exists($localPath)) {
-            $contents = @file_get_contents($localPath);
-            if ($contents !== false) {
-                return $contents;
-            }
-        }
-
-        return null;
-    }
-    private static function perform_http_request(string $url): array {
-        $body        = '';
-        $contentType = null;
-
-        if (function_exists('wp_remote_get')) {
-            $response = wp_remote_get($url, [
-                'timeout' => 15,
-                'headers' => [
-                    'Accept' => 'image/*,application/pdf;q=0.9,*/*;q=0.1',
-                ],
-            ]);
-
-            if (!is_wp_error($response)) {
-                $code = wp_remote_retrieve_response_code($response);
-                if ($code < 400) {
-                    $body        = (string) wp_remote_retrieve_body($response);
-                    $contentType = wp_remote_retrieve_header($response, 'content-type');
-                }
-            }
-        } else {
-            $context = stream_context_create([
-                'http' => [
-                    'timeout' => 15,
-                    'header'  => "Accept: image/*,application/pdf;q=0.9,*/*;q=0.1\r\n",
-                ],
-            ]);
-
-            $fetched = @file_get_contents($url, false, $context);
-            if ($fetched !== false) {
-                $body = $fetched;
-            }
-
-            if (isset($http_response_header) && is_array($http_response_header)) {
-                foreach ($http_response_header as $headerLine) {
-                    if (stripos($headerLine, 'content-type:') === 0) {
-                        $contentType = trim(substr($headerLine, strlen('content-type:')));
-                        break;
-                    }
-                }
-            }
-        }
-
-        if ($body === '') {
-            $local = self::read_local_file($url);
-            if ($local) {
-                $body        = $local['body'];
-                $contentType = $local['content_type'];
-            }
-        }
-
-        return [
-            'body'         => $body,
-            'content_type' => $contentType,
-        ];
-    }
-
-    private static function read_local_file(string $url): ?array {
-        $path = self::url_to_local_path($url);
-        if (!$path || !file_exists($path)) {
-            return null;
-        }
-
-        $body = @file_get_contents($path);
-        if ($body === false) {
-            return null;
-        }
-
-        $type = null;
-        if (function_exists('wp_check_filetype')) {
-            $typeInfo = wp_check_filetype($path);
-            if (!empty($typeInfo['type'])) {
-                $type = $typeInfo['type'];
-            }
-        }
-
-        if (!$type && function_exists('mime_content_type')) {
-            $type = @mime_content_type($path) ?: null;
-        }
-
-        return [
-            'body'         => $body,
-            'content_type' => $type,
-        ];
-    }
-
-    private static function url_to_local_path(string $url): string {
-        if (!is_string($url) || $url === '') {
-            return '';
-        }
-
-        $url = trim($url);
-        if ($url === '') {
-            return '';
-        }
-
-        $uploads = function_exists('wp_upload_dir') ? wp_upload_dir() : null;
-        if (is_array($uploads) && empty($uploads['error']) && !empty($uploads['baseurl']) && !empty($uploads['basedir'])) {
-            $baseUrl = trailingslashit($uploads['baseurl']);
-            if (stripos($url, $baseUrl) === 0) {
-                $relative = ltrim(substr($url, strlen($baseUrl)), '/');
-                $path     = trailingslashit($uploads['basedir']) . str_replace(['\\', '//'], '/', $relative);
-                if (file_exists($path)) {
-                    return $path;
-                }
-            }
-        }
-
-        $siteUrl = function_exists('site_url') ? trailingslashit(site_url()) : '';
-        if ($siteUrl && stripos($url, $siteUrl) === 0) {
-            $relative = ltrim(substr($url, strlen($siteUrl)), '/');
-            $path     = trailingslashit(ABSPATH) . str_replace(['\\', '//'], '/', $relative);
-            if (file_exists($path)) {
-                return $path;
-            }
-        }
-
-        $contentUrl = function_exists('content_url') ? trailingslashit(content_url()) : '';
-        if ($contentUrl && stripos($url, $contentUrl) === 0) {
-            $relative = ltrim(substr($url, strlen($contentUrl)), '/');
-            $path     = trailingslashit(WP_CONTENT_DIR) . str_replace(['\\', '//'], '/', $relative);
-            if (file_exists($path)) {
-                return $path;
-            }
-        }
-
-        return '';
-    }
-    private static function extension_from_url(string $url): string {
-        $path = parse_url($url, PHP_URL_PATH);
-
-        if (!$path) {
-            return '';
-        }
-
-        return strtolower(pathinfo($path, PATHINFO_EXTENSION));
-    }
-
-    private static function extension_from_mime(?string $mime): string {
-        $mime = is_string($mime) ? strtolower(trim($mime)) : '';
-
-        $map = [
-            'image/jpeg'      => 'jpg',
-            'image/jpg'       => 'jpg',
-            'image/png'       => 'png',
-            'image/gif'       => 'gif',
-            'image/webp'      => 'webp',
-            'application/pdf' => 'pdf',
-        ];
-
-        return $map[$mime] ?? '';
-    }
-
-    private static function is_image_extension(string $extension): bool {
-        $extension = strtolower($extension);
-
-        return in_array($extension, ['jpg', 'jpeg', 'png', 'gif', 'webp'], true);
-    }
-
-    private static function is_pdf_extension(string $extension): bool {
-        return strtolower($extension) === 'pdf';
-    }
-
-    private static function pixels_to_points(float $pixels): float {
-        return round($pixels * 72 / 96, 2);
-    }
-
-    private static function sanitize_sheet_name(string $name): string {
-        $name = preg_replace('/[\\\\\\/*\[\]\?:]/', ' ', $name);
-        $name = trim((string) $name);
-
-        if ($name === '') {
-            $name = 'Sheet';
-        }
-
-        if (function_exists('mb_substr')) {
-            $name = mb_substr($name, 0, 31, 'UTF-8');
-        } else {
-            $name = substr($name, 0, 31);
-        }
-
-        return $name;
     }
 }

@@ -176,6 +176,28 @@ class Drawing extends WriterPart
         $objWriter->endElement();
     }
 
+    /** @var array<int, string> */
+    private static array $creationIdCache = [];
+
+    private static function creationIdForRelation(int $relationId): string
+    {
+        if (!isset(self::$creationIdCache[$relationId])) {
+            $hash = md5('phpspreadsheet-drawing-' . $relationId);
+            $uuid = sprintf(
+                '{%s-%s-%s-%s-%s}',
+                substr($hash, 0, 8),
+                substr($hash, 8, 4),
+                substr($hash, 12, 4),
+                substr($hash, 16, 4),
+                substr($hash, 20, 12)
+            );
+
+            self::$creationIdCache[$relationId] = strtoupper($uuid);
+        }
+
+        return self::$creationIdCache[$relationId];
+    }
+
     /**
      * Write drawings to XML format.
      */
@@ -299,12 +321,22 @@ class Drawing extends WriterPart
             $objWriter->writeAttribute('rot', (string) SharedDrawing::degreesToAngle($drawing->getRotation()));
             self::writeAttributeIf($objWriter, $drawing->getFlipVertical(), 'flipV', '1');
             self::writeAttributeIf($objWriter, $drawing->getFlipHorizontal(), 'flipH', '1');
+
+            $objWriter->startElement('a:off');
+            $objWriter->writeAttribute('x', '0');
+            $objWriter->writeAttribute('y', '0');
+            $objWriter->endElement();
+
+            $objWriter->startElement('a:ext');
             if ($isTwoCellAnchor) {
-                $objWriter->startElement('a:ext');
                 $objWriter->writeAttribute('cx', self::stringEmu($drawing->getWidth()));
                 $objWriter->writeAttribute('cy', self::stringEmu($drawing->getHeight()));
-                $objWriter->endElement();
+            } else {
+                $objWriter->writeAttribute('cx', '0');
+                $objWriter->writeAttribute('cy', '0');
             }
+            $objWriter->endElement();
+
             $objWriter->endElement();
 
             // a:prstGeom
@@ -343,6 +375,16 @@ class Drawing extends WriterPart
 
                 $objWriter->endElement();
             }
+            $objWriter->endElement();
+
+            $objWriter->startElement('a:extLst');
+            $objWriter->startElement('a:ext');
+            $objWriter->writeAttribute('uri', '{FF2B5EF4-FFF2-40B4-BE49-F238E27FC236}');
+            $objWriter->writeAttribute('xmlns:a16', 'http://schemas.microsoft.com/office/drawing/2014/main');
+            $objWriter->startElement('a16:creationId');
+            $objWriter->writeAttribute('id', self::creationIdForRelation($relationId));
+            $objWriter->endElement();
+            $objWriter->endElement();
             $objWriter->endElement();
 
             $objWriter->endElement();
